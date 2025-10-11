@@ -1,1368 +1,985 @@
-// ============================================
-// ZION CAR RENTALS - PRODUCTION BACKEND
-// ============================================
+// ==================== CAR RENTAL SYSTEM - COMPLETE BACKEND WITH RAZORPAY ====================
+// Install dependencies first:
+// npm init -y
+// npm install express mongoose bcryptjs jsonwebtoken multer dotenv cors razorpay crypto
 
 const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const morgan = require('morgan');
-const mongoSanitize = require('express-mongo-sanitize');
-const { body, validationResult, param, query } = require('express-validator');
-const dotenv = require('dotenv');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
+require('dotenv').config();
 
-dotenv.config();
-
+// ==================== CONFIGURATION ====================
 const app = express();
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/car-rental';
 
-// ============================================
-// SECURITY & MIDDLEWARE CONFIGURATION
-// ============================================
-
-// Security Headers
-app.use(helmet()); // Sets security HTTP headers
-
-// CORS Configuration
-app.use(cors());
-
-// Rate Limiting (Anti-DDoS)
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later'
+// Initialize Razorpay
+const razorpayInstance = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_YOUR_KEY_ID',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || 'YOUR_KEY_SECRET'
 });
-app.use('/api/', limiter);
 
-// Body Parser
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/uploads', express.static('uploads'));
 
-
-// Logging
-if (process.env.NODE_ENV === 'production') {
-  app.use(morgan('combined')); // Detailed logs
-} else {
-  app.use(morgan('dev')); // Concise logs
+// Create uploads directory
+if (!fs.existsSync('./uploads')) {
+  fs.mkdirSync('./uploads', { recursive: true });
 }
 
-// ============================================
-// DATABASE CONNECTION
-// ============================================
+// ==================== MONGODB CONNECTION ====================
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log('✅ MongoDB Connected'))
+  .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
-mongoose.connect(process.env.MONGODB_URI)
-.then(() => console.log('✅ MongoDB Connected'))
-.catch(err => {
-  console.error('❌ MongoDB Connection Error:', err);
-  process.exit(1);
-});
-
-// ============================================
-// DATABASE MODELS
-// ============================================
+// ==================== SCHEMAS ====================
 
 // User Schema
 const userSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password: { type: String, required: true, minlength: 6 },
-  phone: { type: String, required: true, trim: true },
-  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  mobile: { type: String, required: true },
+  role: { type: String, enum: ['customer', 'admin'], default: 'customer' },
   createdAt: { type: Date, default: Date.now }
 });
-
-// Hash password before saving
-userSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) return next();
-  this.password = await bcrypt.hash(this.password, 12);
-  next();
-});
-
-// Compare password method
-userSchema.methods.comparePassword = async function(candidatePassword) {
-  return await bcrypt.compare(candidatePassword, this.password);
-};
-
-const User = mongoose.model('User', userSchema);
 
 // Car Schema
 const carSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
-  price12hrs: { type: Number, required: true, min: 0 },
-  price24hrs: { type: Number, required: true, min: 0 },
-  transmission: { type: String, enum: ['Manual', 'Automatic'], required: true },
-  fuel: { type: String, enum: ['Petrol', 'Diesel'], required: true },
-  images: [{ type: String }],
+  name: { type: String, required: true },
+  model: { type: String, required: true },
+  type: { type: String, enum: ['normal', 'premium'], required: true },
+  pricePerHour: { type: Number, required: true },
+  description: String,
+  features: [String],
+  imageUrl: String,
+  available: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
-
-// Indexes for performance
-carSchema.index({ name: 1 });
-
-const Car = mongoose.model('Car', carSchema);
 
 // Booking Schema
 const bookingSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   carId: { type: mongoose.Schema.Types.ObjectId, ref: 'Car', required: true },
-  startDate: { type: Date, required: true },
-  endDate: { type: Date, required: true },
-  startTime: { type: String, required: true }, // Format: "HH:MM" e.g., "00:00"
-  endTime: { type: String, required: true },   // Format: "HH:MM" e.g., "12:00"
-  duration: { type: Number, required: true, enum: [12, 24] }, // hours
-  totalAmount: { type: Number, required: true, min: 0 },
-  status: { type: String, enum: ['pending', 'confirmed', 'completed', 'cancelled'], default: 'pending' },
-  paymentId: { type: String },
-  paymentMethod: { type: String },
-  razorpayOrderId: { type: String },
+
+  // Booking Details
+  startTime: { type: Date, required: true },
+  duration: { type: Number, required: true }, // in hours (multiples of 12)
+  endTime: { type: Date, required: true },
+
+  // Personal Information
+  fullName: { type: String, required: true },
+  guardianName: { type: String, required: true },
+  guardianRelation: { type: String, enum: ['S/o', 'W/o', 'D/o'], required: true },
+  residentialAddress: { type: String, required: true },
+  email: { type: String, required: true },
+  mobile: { type: String, required: true },
+  occupation: { type: String, required: true },
+
+  // Reference Contacts
+  reference1Name: { type: String, required: true },
+  reference1Mobile: { type: String, required: true },
+  reference2Name: { type: String, required: true },
+  reference2Mobile: { type: String, required: true },
+
+  // Driving License
+  drivingLicenseNumber: { type: String, required: true },
+  licenseExpiryDate: { type: Date, required: true },
+
+  // Document Uploads
+  drivingLicenseImage: { type: String, required: true },
+  aadharCardImage: { type: String, required: true },
+  livePhoto: { type: String, required: true },
+
+  // Deposit Information
+  depositType: { type: String, enum: ['bike', 'cash', 'online'], required: true },
+  bikeDetails: String,
+  depositAmount: Number,
+  depositStatus: { type: String, enum: ['pending', 'received', 'refunded'], default: 'pending' },
+
+  // Home Delivery
+  homeDelivery: { type: Boolean, default: false },
+  deliveryAddress: String,
+  deliveryDistance: Number,
+  deliveryFee: { type: Number, default: 0 },
+
+  // Vehicle Data
+  vehicleName: String,
+  vehicleNumber: String,
+  startOdometer: Number,
+  endOdometer: Number,
+
+  // Pricing
+  basePrice: Number,
+  lateReturnFee: { type: Number, default: 0 },
+  totalPrice: Number,
+
+  // Status
+  status: { 
+    type: String, 
+    enum: ['pending', 'accepted', 'declined', 'payment_pending', 'paid', 'active', 'completed', 'cancelled'],
+    default: 'pending'
+  },
+  adminNotes: String,
+
+  // Payment & Razorpay
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending' },
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  razorpaySignature: String,
+  paymentDate: Date,
+
+  // Return Details
+  actualReturnTime: Date,
+  lateHours: { type: Number, default: 0 },
+
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Notification Schema
+const notificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
+  message: { type: String, required: true },
+  type: { type: String, enum: ['booking_update', 'payment', 'general'], default: 'general' },
+  read: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 
-// Compound indexes for availability queries
-bookingSchema.index({ carId: 1, startDate: 1, endDate: 1, status: 1 });
-bookingSchema.index({ userId: 1, createdAt: -1 });
-bookingSchema.index({ status: 1 });
-
+// Models
+const User = mongoose.model('User', userSchema);
+const Car = mongoose.model('Car', carSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
+const Notification = mongoose.model('Notification', notificationSchema);
 
-// Cart Schema
-const cartSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  carId: { type: mongoose.Schema.Types.ObjectId, ref: 'Car', required: true },
-  startDate: { type: Date, required: true },
-  endDate: { type: Date, required: true },
-  startTime: { type: String, required: true },
-  endTime: { type: String, required: true },
-  duration: { type: Number, required: true, enum: [12, 24] },
-  calculatedPrice: { type: Number, required: true, min: 0 },
-  createdAt: { type: Date, default: Date.now }
+// ==================== MULTER FILE UPLOAD CONFIG ====================
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
 });
 
-cartSchema.index({ userId: 1 });
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|pdf/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
 
-const Cart = mongoose.model('Cart', cartSchema);
-
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
-// Generate JWT Token
-const generateToken = (userId) => {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || '7d'
-  });
-};
-
-// Create DateTime from date and time strings
-const createDateTime = (dateStr, timeStr) => {
-  const date = new Date(dateStr);
-  const [hours, minutes] = timeStr.split(':');
-  date.setHours(parseInt(hours), parseInt(minutes), 0, 0);
-  return date;
-};
-
-// Check if two time ranges overlap
-const hasTimeOverlap = (start1, end1, start2, end2) => {
-  return start1 < end2 && end1 > start2;
-};
-
-// Check car availability for a time slot
-const checkAvailability = async (carId, startDateTime, endDateTime, excludeBookingId = null) => {
-  const query = {
-    carId: carId,
-    status: { $in: ['pending', 'confirmed'] }
-  };
-  
-  if (excludeBookingId) {
-    query._id = { $ne: excludeBookingId };
-  }
-  
-  const existingBookings = await Booking.find(query);
-  
-  for (let booking of existingBookings) {
-    const bookingStart = createDateTime(booking.startDate, booking.startTime);
-    const bookingEnd = createDateTime(booking.endDate, booking.endTime);
-    
-    if (hasTimeOverlap(startDateTime, endDateTime, bookingStart, bookingEnd)) {
-      return false; // Overlap found
+    if (extname && mimetype) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only images (JPEG, JPG, PNG) and PDFs are allowed!'));
     }
   }
-  
-  return true; // Available
-};
+});
 
-// ============================================
-// AUTHENTICATION MIDDLEWARE
-// ============================================
-
-const protect = async (req, res, next) => {
+// ==================== MIDDLEWARE ====================
+const authenticate = async (req, res, next) => {
   try {
-    let token;
-    
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-    
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'Not authorized to access this route' });
-    }
-    
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(decoded.id).select('-password');
-    
-    if (!req.user) {
-      return res.status(401).json({ success: false, message: 'User not found' });
-    }
-    
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) throw new Error('No token provided');
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+
+    if (!user) throw new Error('User not found');
+
+    req.user = user;
+    req.userId = user._id;
     next();
   } catch (error) {
-    return res.status(401).json({ success: false, message: 'Not authorized to access this route' });
+    res.status(401).json({ error: 'Please authenticate' });
   }
 };
 
-// Admin Middleware
-const adminOnly = (req, res, next) => {
-  if (req.user && req.user.role === 'admin') {
-    next();
-  } else {
-    res.status(403).json({ success: false, message: 'Access denied. Admin only.' });
-  }
-};
-
-// Validation Error Handler
-const validate = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ success: false, errors: errors.array() });
+const isAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
   }
   next();
 };
 
-// ============================================
-// AUTHENTICATION ROUTES
-// ============================================
+// ==================== HELPER FUNCTIONS ====================
+const calculateDeposit = (carType) => {
+  return carType === 'premium' ? 35000 : 25000;
+};
 
-// Register User
-app.post('/api/auth/register', [
-  body('name').trim().notEmpty().withMessage('Name is required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('phone').trim().notEmpty().withMessage('Phone is required')
-], validate, async (req, res) => {
+const calculatePrice = (car, duration, homeDelivery, deliveryDistance) => {
+  let price = car.pricePerHour * duration;
+  if (homeDelivery && deliveryDistance <= 5) {
+    price += 500;
+  }
+  return price;
+};
+
+const calculateLateReturnFee = (scheduledEndTime, actualReturnTime, hourlyRate = 100) => {
+  if (actualReturnTime <= scheduledEndTime) return 0;
+  const lateMs = actualReturnTime - scheduledEndTime;
+  const lateHours = Math.ceil(lateMs / (1000 * 60 * 60));
+  return lateHours * hourlyRate;
+};
+
+const createNotification = async (userId, message, bookingId = null, type = 'general') => {
   try {
-    const { name, email, password, phone } = req.body;
-    
-    // Check if user exists
+    const notification = new Notification({ userId, bookingId, message, type });
+    await notification.save();
+  } catch (error) {
+    console.error('Notification creation error:', error);
+  }
+};
+
+// ==================== AUTH ROUTES ====================
+
+// Register
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password, mobile, role } = req.body;
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ success: false, message: 'User already exists' });
+      return res.status(400).json({ error: 'User already exists' });
     }
-    
-    // Create user
-    const user = await User.create({ name, email, password, phone });
-    
-    // Generate token
-    const token = generateToken(user._id);
-    
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ name, email, password: hashedPassword, mobile, role: role || 'customer' });
+    await user.save();
+
+    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '30d' });
+
     res.status(201).json({
-      success: true,
+      message: 'User registered successfully',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role
-      }
+      user: { id: user._id, name: user.name, email: user.email, role: user.role }
     });
   } catch (error) {
-    console.error('Register Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Login User
-app.post('/api/auth/login', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').notEmpty().withMessage('Password is required')
-], validate, async (req, res) => {
+// Login
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    
-    // Check user exists
+
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
-    
-    // Check password
-    const isMatch = await user.comparePassword(password);
+
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
-    
-    // Generate token
-    const token = generateToken(user._id);
-    
+
+    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '30d' });
+
     res.json({
-      success: true,
+      message: 'Login successful',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role
-      }
+      user: { id: user._id, name: user.name, email: user.email, role: user.role }
     });
   } catch (error) {
-    console.error('Login Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get Profile
-app.get('/api/auth/profile', protect, async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      user: {
-        id: req.user._id,
-        name: req.user.name,
-        email: req.user.email,
-        phone: req.user.phone,
-        role: req.user.role
-      }
-    });
-  } catch (error) {
-    console.error('Profile Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
+// ==================== CAR ROUTES ====================
 
-// Update Profile
-app.put('/api/auth/profile', protect, [
-  body('name').optional().trim().notEmpty(),
-  body('phone').optional().trim().notEmpty()
-], validate, async (req, res) => {
-  try {
-    const { name, phone } = req.body;
-    
-    const updateData = {};
-    if (name) updateData.name = name;
-    if (phone) updateData.phone = phone;
-    
-    const user = await User.findByIdAndUpdate(req.user._id, updateData, { new: true }).select('-password');
-    
-    res.json({ success: true, user });
-  } catch (error) {
-    console.error('Update Profile Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// CAR ROUTES
-// ============================================
-
-// Get All Cars
+// Get all cars
 app.get('/api/cars', async (req, res) => {
   try {
-    const { transmission, fuel, minPrice, maxPrice } = req.query;
-    
-    const filter = {};
-    if (transmission) filter.transmission = transmission;
-    if (fuel) filter.fuel = fuel;
-    if (minPrice || maxPrice) {
-      filter.price12hrs = {};
-      if (minPrice) filter.price12hrs.$gte = Number(minPrice);
-      if (maxPrice) filter.price12hrs.$lte = Number(maxPrice);
-    }
-    
+    const { type, available } = req.query;
+    let filter = {};
+
+    if (type) filter.type = type;
+    if (available !== undefined) filter.available = available === 'true';
+
     const cars = await Car.find(filter).sort({ createdAt: -1 });
-    
-    res.json({ success: true, count: cars.length, data: cars });
+    res.json({ cars });
   } catch (error) {
-    console.error('Get Cars Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get Single Car
-app.get('/api/cars/:id', param('id').isMongoId(), validate, async (req, res) => {
+// Get single car
+app.get('/api/cars/:id', async (req, res) => {
   try {
     const car = await Car.findById(req.params.id);
-    
     if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
+      return res.status(404).json({ error: 'Car not found' });
     }
-    
-    res.json({ success: true, data: car });
+    res.json({ car });
   } catch (error) {
-    console.error('Get Car Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Add Car (Admin Only)
-app.post('/api/cars', protect, adminOnly, [
-  body('name').trim().notEmpty().withMessage('Car name is required'),
-  body('price12hrs').isNumeric().withMessage('12-hour price is required'),
-  body('price24hrs').isNumeric().withMessage('24-hour price is required'),
-  body('transmission').isIn(['Manual', 'Automatic']).withMessage('Invalid transmission type'),
-  body('fuel').isIn(['Petrol', 'Diesel']).withMessage('Invalid fuel type'),
-  body('images').optional().isArray()
-], validate, async (req, res) => {
+// Add car (Admin)
+app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
   try {
-    const { name, price12hrs, price24hrs, transmission, fuel, images } = req.body;
-    
-    const car = await Car.create({ name, price12hrs, price24hrs, transmission, fuel, images: images || [] });
-    
-    res.status(201).json({ success: true, data: car });
+    const { name, model, type, pricePerHour, description, features, imageUrl } = req.body;
+    const car = new Car({ name, model, type, pricePerHour, description, features, imageUrl });
+    await car.save();
+    res.status(201).json({ message: 'Car added successfully', car });
   } catch (error) {
-    console.error('Add Car Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Update Car (Admin Only)
-app.put('/api/cars/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
+// Update car (Admin)
+app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
-    const { name, price12hrs, price24hrs, transmission, fuel, images } = req.body;
-    
-    const car = await Car.findByIdAndUpdate(
-      req.params.id,
-      { name, price12hrs, price24hrs, transmission, fuel, images },
-      { new: true, runValidators: true }
-    );
-    
+    const car = await Car.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
     if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
+      return res.status(404).json({ error: 'Car not found' });
     }
-    
-    res.json({ success: true, data: car });
+    res.json({ message: 'Car updated successfully', car });
   } catch (error) {
-    console.error('Update Car Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Delete Car (Admin Only)
-app.delete('/api/cars/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
+// Delete car (Admin)
+app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const car = await Car.findByIdAndDelete(req.params.id);
-    
     if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
+      return res.status(404).json({ error: 'Car not found' });
     }
-    
-    res.json({ success: true, message: 'Car deleted successfully' });
+    res.json({ message: 'Car deleted successfully' });
   } catch (error) {
-    console.error('Delete Car Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ============================================
-// AVAILABILITY ROUTES
-// ============================================
+// ==================== BOOKING ROUTES ====================
 
-// Check Availability
-app.post('/api/availability/check', [
-  body('carId').isMongoId().withMessage('Valid car ID is required'),
-  body('startDate').isISO8601().withMessage('Valid start date is required'),
-  body('startTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/).withMessage('Valid start time is required (HH:MM)'),
-  body('endDate').isISO8601().withMessage('Valid end date is required'),
-  body('endTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/).withMessage('Valid end time is required (HH:MM)')
-], validate, async (req, res) => {
-  try {
-    const { carId, startDate, startTime, endDate, endTime } = req.body;
-    
-    // Check if car exists
-    const car = await Car.findById(carId);
-    if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
-    }
-    
-    // Create DateTime objects
-    const startDateTime = createDateTime(startDate, startTime);
-    const endDateTime = createDateTime(endDate, endTime);
-    
-    // Validate time range
-    if (startDateTime >= endDateTime) {
-      return res.status(400).json({ success: false, message: 'End time must be after start time' });
-    }
-    
-    // Check availability
-    const isAvailable = await checkAvailability(carId, startDateTime, endDateTime);
-    
-    // Get blocked slots if not available
-    let blockedSlots = [];
-    if (!isAvailable) {
-      const bookings = await Booking.find({
-        carId: carId,
-        status: { $in: ['pending', 'confirmed'] }
-      }).select('startDate startTime endDate endTime');
-      
-      blockedSlots = bookings.map(b => ({
-        start: `${b.startDate.toISOString().split('T')[0]} ${b.startTime}`,
-        end: `${b.endDate.toISOString().split('T')[0]} ${b.endTime}`
-      }));
-    }
-    
-    res.json({
-      success: true,
-      available: isAvailable,
-      message: isAvailable ? 'Car is available for booking' : 'Car is not available for the selected time slot',
-      blockedSlots
-    });
-  } catch (error) {
-    console.error('Check Availability Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
+// Create booking with file uploads
+app.post('/api/bookings', 
+  authenticate,
+  upload.fields([
+    { name: 'drivingLicense', maxCount: 1 },
+    { name: 'aadharCard', maxCount: 1 },
+    { name: 'livePhoto', maxCount: 1 }
+  ]),
+  async (req, res) => {
+    try {
+      const {
+        carId, startTime, duration, fullName, guardianName, guardianRelation,
+        residentialAddress, email, mobile, occupation,
+        reference1Name, reference1Mobile, reference2Name, reference2Mobile,
+        drivingLicenseNumber, licenseExpiryDate,
+        depositType, bikeDetails, homeDelivery, deliveryAddress, deliveryDistance
+      } = req.body;
 
-// Get Available Slots for a Car on a Date
-app.post('/api/availability/available-slots', [
-  body('carId').isMongoId().withMessage('Valid car ID is required'),
-  body('date').isISO8601().withMessage('Valid date is required')
-], validate, async (req, res) => {
-  try {
-    const { carId, date } = req.body;
-    
-    // Check if car exists
-    const car = await Car.findById(carId);
-    if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
-    }
-    
-    // Get all bookings for this car on this date
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
-    
-    const bookings = await Booking.find({
-      carId: carId,
-      status: { $in: ['pending', 'confirmed'] },
-      $or: [
-        { startDate: { $lte: endOfDay }, endDate: { $gte: startOfDay } }
-      ]
-    }).sort({ startTime: 1 });
-    
-    // Calculate available slots
-    const blockedSlots = bookings.map(b => ({
-      start: b.startTime,
-      end: b.endTime
-    }));
-    
-    res.json({
-      success: true,
-      date: date,
-      car: car.name,
-      blockedSlots,
-      message: blockedSlots.length > 0 ? 'Some time slots are booked' : 'All time slots are available'
-    });
-  } catch (error) {
-    console.error('Get Available Slots Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Get Calendar View for a Car
-app.get('/api/availability/calendar/:carId', protect, adminOnly, param('carId').isMongoId(), validate, async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    
-    const currentDate = new Date();
-    const targetMonth = month ? parseInt(month) - 1 : currentDate.getMonth();
-    const targetYear = year ? parseInt(year) : currentDate.getFullYear();
-    
-    const startDate = new Date(targetYear, targetMonth, 1);
-    const endDate = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
-    
-    const bookings = await Booking.find({
-      carId: req.params.carId,
-      status: { $in: ['pending', 'confirmed'] },
-      startDate: { $lte: endDate },
-      endDate: { $gte: startDate }
-    }).populate('userId', 'name email phone').sort({ startDate: 1, startTime: 1 });
-    
-    const car = await Car.findById(req.params.carId);
-    
-    res.json({
-      success: true,
-      car: car ? car.name : 'Unknown',
-      month: targetMonth + 1,
-      year: targetYear,
-      bookings
-    });
-  } catch (error) {
-    console.error('Get Calendar Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// RENTAL/PRICING ROUTES
-// ============================================
-
-// Calculate Rental Price
-app.post('/api/rentals/calculate', [
-  body('carId').isMongoId().withMessage('Valid car ID is required'),
-  body('duration').isIn([12, 24]).withMessage('Duration must be 12 or 24 hours')
-], validate, async (req, res) => {
-  try {
-    const { carId, duration } = req.body;
-    
-    const car = await Car.findById(carId);
-    if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
-    }
-    
-    const price = duration === 12 ? car.price12hrs : car.price24hrs;
-    
-    res.json({
-      success: true,
-      carId: car._id,
-      carName: car.name,
-      duration,
-      price
-    });
-  } catch (error) {
-    console.error('Calculate Price Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// CART ROUTES
-// ============================================
-
-// Add to Cart
-app.post('/api/cart', protect, [
-  body('carId').isMongoId().withMessage('Valid car ID is required'),
-  body('startDate').isISO8601().withMessage('Valid start date is required'),
-  body('startTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/).withMessage('Valid start time is required'),
-  body('endDate').isISO8601().withMessage('Valid end date is required'),
-  body('endTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/).withMessage('Valid end time is required'),
-  body('duration').isIn([12, 24]).withMessage('Duration must be 12 or 24 hours')
-], validate, async (req, res) => {
-  try {
-    const { carId, startDate, startTime, endDate, endTime, duration } = req.body;
-    
-    // Check if car exists
-    const car = await Car.findById(carId);
-    if (!car) {
-      return res.status(404).json({ success: false, message: 'Car not found' });
-    }
-    
-    // Create DateTime objects
-    const startDateTime = createDateTime(startDate, startTime);
-    const endDateTime = createDateTime(endDate, endTime);
-    
-    // Check availability
-    const isAvailable = await checkAvailability(carId, startDateTime, endDateTime);
-    if (!isAvailable) {
-      return res.status(400).json({ success: false, message: 'Car is not available for the selected time slot' });
-    }
-    
-    // Calculate price
-    const price = duration === 12 ? car.price12hrs : car.price24hrs;
-    
-    // Check if already in cart
-    const existingCartItem = await Cart.findOne({ userId: req.user._id, carId });
-    if (existingCartItem) {
-      return res.status(400).json({ success: false, message: 'Car already in cart' });
-    }
-    
-    // Add to cart
-    const cartItem = await Cart.create({
-      userId: req.user._id,
-      carId,
-      startDate,
-      startTime,
-      endDate,
-      endTime,
-      duration,
-      calculatedPrice: price
-    });
-    
-    const populatedItem = await Cart.findById(cartItem._id).populate('carId');
-    
-    res.status(201).json({ success: true, data: populatedItem });
-  } catch (error) {
-    console.error('Add to Cart Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Get Cart
-app.get('/api/cart', protect, async (req, res) => {
-  try {
-    const cartItems = await Cart.find({ userId: req.user._id }).populate('carId').sort({ createdAt: -1 });
-    
-    const totalAmount = cartItems.reduce((sum, item) => sum + item.calculatedPrice, 0);
-    
-    res.json({ success: true, count: cartItems.length, totalAmount, data: cartItems });
-  } catch (error) {
-    console.error('Get Cart Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Update Cart Item
-app.put('/api/cart/:itemId', protect, param('itemId').isMongoId(), [
-  body('startDate').optional().isISO8601(),
-  body('startTime').optional().matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
-  body('endDate').optional().isISO8601(),
-  body('endTime').optional().matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
-  body('duration').optional().isIn([12, 24])
-], validate, async (req, res) => {
-  try {
-    const cartItem = await Cart.findOne({ _id: req.params.itemId, userId: req.user._id });
-    
-    if (!cartItem) {
-      return res.status(404).json({ success: false, message: 'Cart item not found' });
-    }
-    
-    const { startDate, startTime, endDate, endTime, duration } = req.body;
-    
-    // Update fields if provided
-    if (startDate) cartItem.startDate = startDate;
-    if (startTime) cartItem.startTime = startTime;
-    if (endDate) cartItem.endDate = endDate;
-    if (endTime) cartItem.endTime = endTime;
-    if (duration) cartItem.duration = duration;
-    
-    // Recalculate price if duration changed
-    if (duration) {
-      const car = await Car.findById(cartItem.carId);
-      cartItem.calculatedPrice = duration === 12 ? car.price12hrs : car.price24hrs;
-    }
-    
-    // Check availability with new times
-    const startDateTime = createDateTime(cartItem.startDate, cartItem.startTime);
-    const endDateTime = createDateTime(cartItem.endDate, cartItem.endTime);
-    
-    const isAvailable = await checkAvailability(cartItem.carId, startDateTime, endDateTime);
-    if (!isAvailable) {
-      return res.status(400).json({ success: false, message: 'Car is not available for the selected time slot' });
-    }
-    
-    await cartItem.save();
-    
-    const updatedItem = await Cart.findById(cartItem._id).populate('carId');
-    
-    res.json({ success: true, data: updatedItem });
-  } catch (error) {
-    console.error('Update Cart Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Remove from Cart
-app.delete('/api/cart/:itemId', protect, param('itemId').isMongoId(), validate, async (req, res) => {
-  try {
-    const cartItem = await Cart.findOneAndDelete({ _id: req.params.itemId, userId: req.user._id });
-    
-    if (!cartItem) {
-      return res.status(404).json({ success: false, message: 'Cart item not found' });
-    }
-    
-    res.json({ success: true, message: 'Item removed from cart' });
-  } catch (error) {
-    console.error('Remove from Cart Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Clear Cart
-app.delete('/api/cart', protect, async (req, res) => {
-  try {
-    await Cart.deleteMany({ userId: req.user._id });
-    
-    res.json({ success: true, message: 'Cart cleared' });
-  } catch (error) {
-    console.error('Clear Cart Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// CHECKOUT & BOOKING ROUTES
-// ============================================
-
-// Create Booking from Cart
-app.post('/api/checkout', protect, async (req, res) => {
-  try {
-    // Get cart items
-    const cartItems = await Cart.find({ userId: req.user._id }).populate('carId');
-    
-    if (cartItems.length === 0) {
-      return res.status(400).json({ success: false, message: 'Cart is empty' });
-    }
-    
-    // Revalidate availability for all items
-    for (let item of cartItems) {
-      const startDateTime = createDateTime(item.startDate, item.startTime);
-      const endDateTime = createDateTime(item.endDate, item.endTime);
-      
-      const isAvailable = await checkAvailability(item.carId._id, startDateTime, endDateTime);
-      if (!isAvailable) {
-        return res.status(400).json({ 
-          success: false, 
-          message: `${item.carId.name} is no longer available for the selected time slot` 
-        });
+      // Validate duration
+      if (duration % 12 !== 0) {
+        return res.status(400).json({ error: 'Duration must be in multiples of 12 hours' });
       }
-    }
-    
-    // Create bookings
-    const bookings = [];
-    for (let item of cartItems) {
-      const booking = await Booking.create({
-        userId: req.user._id,
-        carId: item.carId._id,
-        startDate: item.startDate,
-        endDate: item.endDate,
-        startTime: item.startTime,
-        endTime: item.endTime,
-        duration: item.duration,
-        totalAmount: item.calculatedPrice,
+
+      const car = await Car.findById(carId);
+      if (!car) {
+        return res.status(404).json({ error: 'Car not found' });
+      }
+      if (!car.available) {
+        return res.status(400).json({ error: 'Car is not available' });
+      }
+
+      if (!req.files.drivingLicense || !req.files.aadharCard || !req.files.livePhoto) {
+        return res.status(400).json({ error: 'All documents (Driving License, Aadhar, Live Photo) are required' });
+      }
+
+      const start = new Date(startTime);
+      const end = new Date(start.getTime() + (duration * 60 * 60 * 1000));
+      const depositAmount = calculateDeposit(car.type);
+      const deliveryFee = (homeDelivery && deliveryDistance <= 5) ? 500 : 0;
+      const basePrice = calculatePrice(car, duration, homeDelivery, deliveryDistance);
+
+      const booking = new Booking({
+        customerId: req.userId,
+        carId,
+        startTime: start,
+        duration: parseInt(duration),
+        endTime: end,
+        fullName, guardianName, guardianRelation, residentialAddress, email, mobile, occupation,
+        reference1Name, reference1Mobile, reference2Name, reference2Mobile,
+        drivingLicenseNumber,
+        licenseExpiryDate: new Date(licenseExpiryDate),
+        drivingLicenseImage: req.files.drivingLicense[0].path,
+        aadharCardImage: req.files.aadharCard[0].path,
+        livePhoto: req.files.livePhoto[0].path,
+        depositType,
+        bikeDetails: depositType === 'bike' ? bikeDetails : null,
+        depositAmount,
+        homeDelivery: homeDelivery === 'true',
+        deliveryAddress: homeDelivery ? deliveryAddress : null,
+        deliveryDistance: homeDelivery ? parseFloat(deliveryDistance) : 0,
+        deliveryFee,
+        basePrice,
+        totalPrice: basePrice,
         status: 'pending'
       });
-      
-      bookings.push(booking);
+
+      await booking.save();
+
+      await createNotification(
+        req.userId,
+        `New booking request submitted for ${car.name}`,
+        booking._id,
+        'booking_update'
+      );
+
+      res.status(201).json({
+        message: 'Booking submitted successfully. Waiting for admin approval.',
+        booking
+      });
+    } catch (error) {
+      console.error('Booking error:', error);
+      res.status(500).json({ error: error.message });
     }
-    
-    // Clear cart
-    await Cart.deleteMany({ userId: req.user._id });
-    
-    // Calculate total
-    const totalAmount = bookings.reduce((sum, b) => sum + b.totalAmount, 0);
-    
-    res.status(201).json({
-      success: true,
-      message: 'Bookings created successfully',
-      bookings,
-      totalAmount,
-      // In production, you'd create Razorpay order here and return order_id
-      razorpayOrderId: 'order_' + Date.now() // Placeholder
-    });
-  } catch (error) {
-    console.error('Checkout Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
 });
 
-// ============================================
-// PAYMENT ROUTES
-// ============================================
-
-// Initiate Payment
-app.post('/api/payment/initiate', protect, [
-  body('bookingIds').isArray().withMessage('Booking IDs must be an array'),
-  body('bookingIds.*').isMongoId().withMessage('Invalid booking ID')
-], validate, async (req, res) => {
+// Get customer's bookings
+app.get('/api/bookings/my-bookings', authenticate, async (req, res) => {
   try {
-    const { bookingIds } = req.body;
-    
-    // Verify bookings belong to user
-    const bookings = await Booking.find({ _id: { $in: bookingIds }, userId: req.user._id });
-    
-    if (bookings.length !== bookingIds.length) {
-      return res.status(400).json({ success: false, message: 'Invalid booking IDs' });
-    }
-    
-    const totalAmount = bookings.reduce((sum, b) => sum + b.totalAmount, 0);
-    
-    // In production: Create Razorpay order
-    // const razorpay = require('razorpay');
-    // const instance = new razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
-    // const order = await instance.orders.create({ amount: totalAmount * 100, currency: 'INR' });
-    
-    res.json({
-      success: true,
-      orderId: 'order_' + Date.now(), // Placeholder - replace with actual Razorpay order_id
-      amount: totalAmount,
-      currency: 'INR',
-      keyId: process.env.RAZORPAY_KEY_ID
-    });
+    const bookings = await Booking.find({ customerId: req.userId })
+      .populate('carId', 'name model type imageUrl')
+      .sort({ createdAt: -1 });
+    res.json({ bookings });
   } catch (error) {
-    console.error('Initiate Payment Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Verify Payment
-app.post('/api/payment/verify', protect, [
-  body('razorpayOrderId').notEmpty(),
-  body('razorpayPaymentId').notEmpty(),
-  body('razorpaySignature').notEmpty(),
-  body('bookingIds').isArray()
-], validate, async (req, res) => {
-  try {
-    const { razorpayOrderId, razorpayPaymentId, razorpaySignature, bookingIds } = req.body;
-    
-    // In production: Verify Razorpay signature
-    // const crypto = require('crypto');
-    // const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
-    // hmac.update(razorpayOrderId + '|' + razorpayPaymentId);
-    // const generatedSignature = hmac.digest('hex');
-    // if (generatedSignature !== razorpaySignature) {
-    //   return res.status(400).json({ success: false, message: 'Invalid payment signature' });
-    // }
-    
-    // Update bookings
-    await Booking.updateMany(
-      { _id: { $in: bookingIds }, userId: req.user._id },
-      {
-        status: 'confirmed',
-        paymentId: razorpayPaymentId,
-        razorpayOrderId: razorpayOrderId,
-        paymentMethod: 'Razorpay'
-      }
-    );
-    
-    res.json({ success: true, message: 'Payment verified and bookings confirmed' });
-  } catch (error) {
-    console.error('Verify Payment Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// ORDER/BOOKING ROUTES
-// ============================================
-
-// Get User's Bookings
-app.get('/api/orders', protect, async (req, res) => {
+// Get all bookings (Admin)
+app.get('/api/bookings', authenticate, isAdmin, async (req, res) => {
   try {
     const { status } = req.query;
-    
-    const filter = { userId: req.user._id };
+    let filter = {};
     if (status) filter.status = status;
-    
-    const bookings = await Booking.find(filter).populate('carId').sort({ createdAt: -1 });
-    
-    res.json({ success: true, count: bookings.length, data: bookings });
-  } catch (error) {
-    console.error('Get Orders Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
 
-// Get Single Booking
-app.get('/api/orders/:id', protect, param('id').isMongoId(), validate, async (req, res) => {
-  try {
-    const booking = await Booking.findOne({ _id: req.params.id, userId: req.user._id }).populate('carId');
-    
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
-    }
-    
-    res.json({ success: true, data: booking });
-  } catch (error) {
-    console.error('Get Order Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Cancel Booking
-app.put('/api/orders/:id/cancel', protect, param('id').isMongoId(), validate, async (req, res) => {
-  try {
-    const booking = await Booking.findOne({ _id: req.params.id, userId: req.user._id });
-    
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
-    }
-    
-    if (booking.status === 'completed' || booking.status === 'cancelled') {
-      return res.status(400).json({ success: false, message: 'Cannot cancel this booking' });
-    }
-    
-    booking.status = 'cancelled';
-    await booking.save();
-    
-    res.json({ success: true, message: 'Booking cancelled', data: booking });
-  } catch (error) {
-    console.error('Cancel Booking Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// ADMIN ROUTES
-// ============================================
-
-// Get All Bookings (Admin)
-app.get('/api/admin/bookings', protect, adminOnly, async (req, res) => {
-  try {
-    const { status, carId, startDate, endDate } = req.query;
-    
-    const filter = {};
-    if (status) filter.status = status;
-    if (carId) filter.carId = carId;
-    if (startDate || endDate) {
-      filter.startDate = {};
-      if (startDate) filter.startDate.$gte = new Date(startDate);
-      if (endDate) filter.startDate.$lte = new Date(endDate);
-    }
-    
     const bookings = await Booking.find(filter)
-      .populate('userId', 'name email phone')
-      .populate('carId')
+      .populate('customerId', 'name email mobile')
+      .populate('carId', 'name model type')
       .sort({ createdAt: -1 });
-    
-    res.json({ success: true, count: bookings.length, data: bookings });
+    res.json({ bookings });
   } catch (error) {
-    console.error('Admin Get Bookings Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get Single Booking (Admin)
-app.get('/api/admin/bookings/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
+// Get single booking
+app.get('/api/bookings/:id', authenticate, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id)
-      .populate('userId', 'name email phone')
+      .populate('customerId', 'name email mobile')
       .populate('carId');
-    
+
     if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
+      return res.status(404).json({ error: 'Booking not found' });
     }
-    
-    res.json({ success: true, data: booking });
+
+    if (req.user.role !== 'admin' && booking.customerId._id.toString() !== req.userId.toString()) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({ booking });
   } catch (error) {
-    console.error('Admin Get Booking Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Update Booking Status (Admin)
-app.put('/api/admin/bookings/:id/status', protect, adminOnly, [
-  param('id').isMongoId(),
-  body('status').isIn(['pending', 'confirmed', 'completed', 'cancelled'])
-], validate, async (req, res) => {
+// Admin: Accept/Decline booking
+app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
   try {
-    const { status } = req.body;
-    
-    const booking = await Booking.findByIdAndUpdate(
-      req.params.id,
-      { status },
+    const { action, adminNotes } = req.body;
+
+    const booking = await Booking.findById(req.params.id).populate('carId');
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (booking.status !== 'pending') {
+      return res.status(400).json({ error: 'Booking has already been reviewed' });
+    }
+
+    if (action === 'accept') {
+      booking.status = 'payment_pending';
+      booking.adminNotes = adminNotes;
+
+      await createNotification(
+        booking.customerId,
+        `Your booking for ${booking.carId.name} has been accepted! Please proceed with payment.`,
+        booking._id,
+        'booking_update'
+      );
+
+      await booking.save();
+      res.json({ message: 'Booking accepted. Customer can now proceed with payment.', booking });
+
+    } else if (action === 'decline') {
+      booking.status = 'declined';
+      booking.adminNotes = adminNotes;
+
+      await Car.findByIdAndUpdate(booking.carId, { available: true });
+
+      await createNotification(
+        booking.customerId,
+        `Your booking for ${booking.carId.name} has been declined. Reason: ${adminNotes}`,
+        booking._id,
+        'booking_update'
+      );
+
+      await booking.save();
+      res.json({ message: 'Booking declined', booking });
+    } else {
+      return res.status(400).json({ error: 'Invalid action. Use "accept" or "decline"' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Start rental
+app.put('/api/bookings/:id/start', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { vehicleName, vehicleNumber, startOdometer } = req.body;
+
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (booking.status !== 'paid') {
+      return res.status(400).json({ error: 'Payment must be completed first' });
+    }
+
+    booking.status = 'active';
+    booking.vehicleName = vehicleName;
+    booking.vehicleNumber = vehicleNumber;
+    booking.startOdometer = startOdometer;
+    booking.depositStatus = 'received';
+
+    await booking.save();
+
+    await createNotification(
+      booking.customerId,
+      `Your rental for ${vehicleName} has started. Enjoy your ride!`,
+      booking._id,
+      'booking_update'
+    );
+
+    res.json({ message: 'Booking marked as active', booking });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Complete booking
+app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { endOdometer, actualReturnTime } = req.body;
+
+    const booking = await Booking.findById(req.params.id).populate('carId');
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (booking.status !== 'active') {
+      return res.status(400).json({ error: 'Booking is not active' });
+    }
+
+    const returnTime = actualReturnTime ? new Date(actualReturnTime) : new Date();
+    const lateFee = calculateLateReturnFee(booking.endTime, returnTime);
+    const lateHours = lateFee > 0 ? Math.ceil((returnTime - booking.endTime) / (1000 * 60 * 60)) : 0;
+
+    booking.status = 'completed';
+    booking.endOdometer = endOdometer;
+    booking.actualReturnTime = returnTime;
+    booking.lateReturnFee = lateFee;
+    booking.lateHours = lateHours;
+    booking.totalPrice = booking.basePrice + lateFee;
+    booking.depositStatus = 'refunded';
+
+    await Car.findByIdAndUpdate(booking.carId, { available: true });
+
+    let message = `Your rental for ${booking.carId.name} is completed.`;
+    if (lateFee > 0) {
+      message += ` Late return fee of ₹${lateFee} has been charged (${lateHours} hours late).`;
+    }
+    message += ` Your deposit will be refunded.`;
+
+    await createNotification(booking.customerId, message, booking._id, 'booking_update');
+
+    await booking.save();
+    res.json({ message: 'Booking completed successfully', booking, lateFee, lateHours });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== RAZORPAY PAYMENT ROUTES ====================
+
+// Create Razorpay Order
+app.post('/api/payment/create-order', authenticate, async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+
+    const booking = await Booking.findById(bookingId).populate('carId');
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (booking.customerId.toString() !== req.userId.toString()) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (booking.status !== 'payment_pending') {
+      return res.status(400).json({ error: 'Booking must be accepted by admin before payment' });
+    }
+
+    const options = {
+      amount: booking.totalPrice * 100,
+      currency: 'INR',
+      receipt: `booking_${bookingId}`,
+      notes: {
+        bookingId: bookingId.toString(),
+        customerId: req.userId.toString(),
+        carName: booking.carId.name,
+        duration: booking.duration,
+        depositAmount: booking.depositAmount
+      }
+    };
+
+    const razorpayOrder = await razorpayInstance.orders.create(options);
+
+    booking.razorpayOrderId = razorpayOrder.id;
+    booking.updatedAt = Date.now();
+    await booking.save();
+
+    res.json({
+      success: true,
+      order: razorpayOrder,
+      bookingDetails: {
+        amount: booking.totalPrice,
+        carName: booking.carId.name,
+        duration: booking.duration,
+        depositAmount: booking.depositAmount
+      },
+      razorpayKeyId: process.env.RAZORPAY_KEY_ID
+    });
+
+  } catch (error) {
+    console.error('Razorpay order creation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verify Razorpay Payment
+app.post('/api/payment/verify', authenticate, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
+
+    const body = razorpay_order_id + '|' + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest('hex');
+
+    const isAuthentic = expectedSignature === razorpay_signature;
+
+    if (!isAuthentic) {
+      return res.status(400).json({ success: false, error: 'Payment verification failed - Invalid signature' });
+    }
+
+    const booking = await Booking.findById(bookingId).populate('carId');
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    booking.status = 'paid';
+    booking.paymentStatus = 'completed';
+    booking.razorpayPaymentId = razorpay_payment_id;
+    booking.razorpayOrderId = razorpay_order_id;
+    booking.razorpaySignature = razorpay_signature;
+    booking.paymentDate = new Date();
+    booking.updatedAt = Date.now();
+
+    await booking.save();
+    await Car.findByIdAndUpdate(booking.carId, { available: false });
+
+    await createNotification(
+      booking.customerId,
+      `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.name}. Booking confirmed!`,
+      booking._id,
+      'payment'
+    );
+
+    res.json({ success: true, message: 'Payment verified successfully!', booking });
+
+  } catch (error) {
+    console.error('Payment verification error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Razorpay Webhook
+app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const webhookSignature = req.headers['x-razorpay-signature'];
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    const expectedSignature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(JSON.stringify(req.body))
+      .digest('hex');
+
+    if (webhookSignature !== expectedSignature) {
+      return res.status(400).json({ error: 'Invalid webhook signature' });
+    }
+
+    const event = req.body.event;
+    const paymentEntity = req.body.payload.payment.entity;
+
+    console.log('Webhook Event:', event);
+
+    switch (event) {
+      case 'payment.authorized':
+        const bookingId = paymentEntity.notes.bookingId;
+        const booking = await Booking.findById(bookingId).populate('carId');
+        if (booking) {
+          booking.status = 'paid';
+          booking.paymentStatus = 'completed';
+          booking.razorpayPaymentId = paymentEntity.id;
+          booking.paymentDate = new Date();
+          await booking.save();
+          await Car.findByIdAndUpdate(booking.carId, { available: false });
+          await createNotification(
+            booking.customerId,
+            `Payment of ₹${paymentEntity.amount / 100} confirmed for ${booking.carId.name}!`,
+            booking._id,
+            'payment'
+          );
+        }
+        break;
+
+      case 'payment.failed':
+        const failedBookingId = paymentEntity.notes.bookingId;
+        const failedBooking = await Booking.findById(failedBookingId).populate('carId');
+        if (failedBooking) {
+          failedBooking.paymentStatus = 'failed';
+          await failedBooking.save();
+          await createNotification(
+            failedBooking.customerId,
+            `Payment failed for ${failedBooking.carId.name}. Please try again.`,
+            failedBooking._id,
+            'payment'
+          );
+        }
+        break;
+
+      default:
+        console.log('Unhandled webhook event:', event);
+    }
+
+    res.json({ status: 'ok' });
+
+  } catch (error) {
+    console.error('Webhook error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get Payment Details
+app.get('/api/payment/:paymentId', authenticate, async (req, res) => {
+  try {
+    const payment = await razorpayInstance.payments.fetch(req.params.paymentId);
+    res.json({ success: true, payment });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Refund Payment (Admin)
+app.post('/api/payment/refund', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { paymentId, amount } = req.body;
+
+    const refund = await razorpayInstance.payments.refund(paymentId, {
+      amount: amount * 100,
+      speed: 'normal'
+    });
+
+    res.json({ success: true, message: 'Refund initiated successfully', refund });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOTIFICATION ROUTES ====================
+
+// Get user notifications
+app.get('/api/notifications', authenticate, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.userId })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    res.json({ notifications });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mark notification as read
+app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, userId: req.userId },
+      { read: true },
       { new: true }
-    ).populate('carId');
-    
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
+    );
+
+    if (!notification) {
+      return res.status(404).json({ error: 'Notification not found' });
     }
-    
-    res.json({ success: true, message: 'Booking status updated', data: booking });
+
+    res.json({ message: 'Notification marked as read', notification });
   } catch (error) {
-    console.error('Update Booking Status Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Delete Booking (Admin)
-app.delete('/api/admin/bookings/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
-  try {
-    const booking = await Booking.findByIdAndDelete(req.params.id);
-    
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
-    }
-    
-    res.json({ success: true, message: 'Booking deleted' });
-  } catch (error) {
-    console.error('Delete Booking Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
+// ==================== ADMIN ANALYTICS ====================
 
-// Get All Users (Admin)
-app.get('/api/admin/users', protect, adminOnly, async (req, res) => {
-  try {
-    const users = await User.find().select('-password').sort({ createdAt: -1 });
-    
-    res.json({ success: true, count: users.length, data: users });
-  } catch (error) {
-    console.error('Get Users Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Get Single User (Admin)
-app.get('/api/admin/users/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Get user's bookings
-    const bookings = await Booking.find({ userId: user._id }).populate('carId');
-    
-    res.json({ success: true, data: { user, bookings } });
-  } catch (error) {
-    console.error('Get User Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Update User Role (Admin)
-app.put('/api/admin/users/:id/role', protect, adminOnly, [
-  param('id').isMongoId(),
-  body('role').isIn(['user', 'admin'])
-], validate, async (req, res) => {
-  try {
-    const { role } = req.body;
-    
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { role },
-      { new: true }
-    ).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    res.json({ success: true, message: 'User role updated', data: user });
-  } catch (error) {
-    console.error('Update User Role Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Delete User (Admin)
-app.delete('/api/admin/users/:id', protect, adminOnly, param('id').isMongoId(), validate, async (req, res) => {
-  try {
-    const user = await User.findByIdAndDelete(req.params.id);
-    
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    
-    // Also delete user's bookings and cart
-    await Booking.deleteMany({ userId: user._id });
-    await Cart.deleteMany({ userId: user._id });
-    
-    res.json({ success: true, message: 'User deleted' });
-  } catch (error) {
-    console.error('Delete User Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Dashboard Stats (Admin)
-app.get('/api/admin/dashboard/stats', protect, adminOnly, async (req, res) => {
+app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   try {
     const totalCars = await Car.countDocuments();
-    const totalUsers = await User.countDocuments();
+    const availableCars = await Car.countDocuments({ available: true });
     const totalBookings = await Booking.countDocuments();
-    const activeBookings = await Booking.countDocuments({ status: { $in: ['pending', 'confirmed'] } });
+    const activeBookings = await Booking.countDocuments({ status: 'active' });
+    const pendingBookings = await Booking.countDocuments({ status: 'pending' });
     const completedBookings = await Booking.countDocuments({ status: 'completed' });
-    
-    // Calculate total revenue
-    const revenueResult = await Booking.aggregate([
-      { $match: { status: { $in: ['confirmed', 'completed'] } } },
-      { $group: { _id: null, totalRevenue: { $sum: '$totalAmount' } } }
+
+    const totalRevenue = await Booking.aggregate([
+      { $match: { status: 'completed' } },
+      { $group: { _id: null, total: { $sum: '$totalPrice' } } }
     ]);
-    
-    const totalRevenue = revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
-    
+
     res.json({
-      success: true,
-      data: {
+      stats: {
         totalCars,
-        totalUsers,
+        availableCars,
         totalBookings,
         activeBookings,
+        pendingBookings,
         completedBookings,
-        totalRevenue
+        totalRevenue: totalRevenue[0]?.total || 0
       }
     });
   } catch (error) {
-    console.error('Dashboard Stats Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Revenue by Date Range (Admin)
-app.get('/api/admin/dashboard/revenue', protect, adminOnly, [
-  query('startDate').optional().isISO8601(),
-  query('endDate').optional().isISO8601()
-], validate, async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-    
-    const filter = { status: { $in: ['confirmed', 'completed'] } };
-    
-    if (startDate || endDate) {
-      filter.createdAt = {};
-      if (startDate) filter.createdAt.$gte = new Date(startDate);
-      if (endDate) filter.createdAt.$lte = new Date(endDate);
+// ==================== ROOT ROUTE ====================
+
+app.get('/', (req, res) => {
+  res.json({
+    message: '🚗 Car Rental System API with Razorpay',
+    version: '2.0.0',
+    endpoints: {
+      auth: [
+        'POST /api/auth/register - Register new user',
+        'POST /api/auth/login - Login user'
+      ],
+      cars: [
+        'GET /api/cars - Get all cars',
+        'GET /api/cars/:id - Get single car',
+        'POST /api/cars - Add car (admin)',
+        'PUT /api/cars/:id - Update car (admin)',
+        'DELETE /api/cars/:id - Delete car (admin)'
+      ],
+      bookings: [
+        'POST /api/bookings - Create booking with documents',
+        'GET /api/bookings/my-bookings - Get customer bookings',
+        'GET /api/bookings/:id - Get single booking',
+        'GET /api/bookings - Get all bookings (admin)',
+        'PUT /api/bookings/:id/review - Accept/Decline booking (admin)',
+        'PUT /api/bookings/:id/start - Start rental (admin)',
+        'PUT /api/bookings/:id/complete - Complete rental (admin)'
+      ],
+      payment: [
+        'POST /api/payment/create-order - Create Razorpay order',
+        'POST /api/payment/verify - Verify payment signature',
+        'POST /api/payment/webhook - Razorpay webhook',
+        'GET /api/payment/:paymentId - Get payment details',
+        'POST /api/payment/refund - Refund payment (admin)'
+      ],
+      notifications: [
+        'GET /api/notifications - Get user notifications',
+        'PUT /api/notifications/:id/read - Mark as read'
+      ],
+      admin: [
+        'GET /api/admin/stats - Get dashboard statistics'
+      ]
     }
-    
-    const revenueResult = await Booking.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-          revenue: { $sum: '$totalAmount' },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
-    
-    res.json({ success: true, data: revenueResult });
-  } catch (error) {
-    console.error('Revenue Report Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Popular Cars (Admin)
-app.get('/api/admin/dashboard/popular-cars', protect, adminOnly, async (req, res) => {
-  try {
-    const popularCars = await Booking.aggregate([
-      { $match: { status: { $in: ['confirmed', 'completed'] } } },
-      { $group: { _id: '$carId', bookingCount: { $sum: 1 }, totalRevenue: { $sum: '$totalAmount' } } },
-      { $sort: { bookingCount: -1 } },
-      { $limit: 10 },
-      {
-        $lookup: {
-          from: 'cars',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'carDetails'
-        }
-      },
-      { $unwind: '$carDetails' },
-      {
-        $project: {
-          carName: '$carDetails.name',
-          bookingCount: 1,
-          totalRevenue: 1
-        }
-      }
-    ]);
-    
-    res.json({ success: true, data: popularCars });
-  } catch (error) {
-    console.error('Popular Cars Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// Get Calendar View (Admin)
-app.get('/api/admin/calendar', protect, adminOnly, [
-  query('month').optional().isInt({ min: 1, max: 12 }),
-  query('year').optional().isInt()
-], validate, async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    
-    const currentDate = new Date();
-    const targetMonth = month ? parseInt(month) - 1 : currentDate.getMonth();
-    const targetYear = year ? parseInt(year) : currentDate.getFullYear();
-    
-    const startDate = new Date(targetYear, targetMonth, 1);
-    const endDate = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
-    
-    const bookings = await Booking.find({
-      status: { $in: ['pending', 'confirmed'] },
-      startDate: { $lte: endDate },
-      endDate: { $gte: startDate }
-    })
-    .populate('userId', 'name email phone')
-    .populate('carId')
-    .sort({ startDate: 1, startTime: 1 });
-    
-    res.json({
-      success: true,
-      month: targetMonth + 1,
-      year: targetYear,
-      count: bookings.length,
-      bookings
-    });
-  } catch (error) {
-    console.error('Calendar Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// SEEDER ROUTE (Dev Only - Remove in Production)
-// ============================================
-
-app.post('/api/seed/cars', async (req, res) => {
-  try {
-    // Clear existing cars
-    await Car.deleteMany({});
-    
-    const cars = [
-      { name: "Baleno", price12hrs: 1300, price24hrs: 2300, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "i10", price12hrs: 1150, price24hrs: 1799, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Amaze", price12hrs: 1499, price24hrs: 2499, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Fronx", price12hrs: 1599, price24hrs: 2599, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Venue", price12hrs: 1699, price24hrs: 2699, transmission: "Automatic", fuel: "Petrol", images: [] },
-      { name: "City", price12hrs: 1799, price24hrs: 2899, transmission: "Automatic", fuel: "Petrol", images: [] },
-      { name: "Verna", price12hrs: 1699, price24hrs: 2699, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Creta", price12hrs: 2299, price24hrs: 3499, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Thar", price12hrs: 2499, price24hrs: 4500, transmission: "Automatic", fuel: "Petrol", images: [] },
-      { name: "X16", price12hrs: 1899, price24hrs: 3199, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Ertiga", price12hrs: 1799, price24hrs: 3199, transmission: "Manual", fuel: "Petrol", images: [] },
-      { name: "Innova High Cross", price12hrs: 3799, price24hrs: 5999, transmission: "Automatic", fuel: "Petrol", images: [] }
-    ];
-    
-    await Car.insertMany(cars);
-    
-    res.json({ success: true, message: '12 cars seeded successfully', count: cars.length });
-  } catch (error) {
-    console.error('Seed Cars Error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ============================================
-// ERROR HANDLING
-// ============================================
-
-// 404 Handler
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Route not found' });
-});
-
-// Global Error Handler
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  
-  res.status(err.statusCode || 500).json({
-    success: false,
-    message: err.message || 'Internal Server Error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
-// ============================================
-// START SERVER
-// ============================================
+// ==================== ERROR HANDLER ====================
 
-const PORT = process.env.PORT || 5000;
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
+// ==================== START SERVER ====================
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+  console.log(`
+╔═══════════════════════════════════════════════════════╗
+║   🚗 CAR RENTAL SYSTEM WITH RAZORPAY RUNNING         ║
+║   Port: ${PORT}                                        
+║   MongoDB: ${MONGODB_URI}                             
+║   Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured'}
+╚═══════════════════════════════════════════════════════╝
+
+📝 Setup Instructions:
+1. Create .env file with:
+   - RAZORPAY_KEY_ID=rzp_test_xxxxx
+   - RAZORPAY_KEY_SECRET=xxxxxx
+   - RAZORPAY_WEBHOOK_SECRET=xxxxx
+   - JWT_SECRET=your-secret
+   - MONGODB_URI=mongodb://localhost:27017/car-rental
+
+2. Start MongoDB server
+
+3. Test with Razorpay test credentials:
+   - Card: 4111 1111 1111 1111
+   - UPI: success@razorpay
+
+🚀 Server ready!
+  `);
 });
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Promise Rejection:', err);
-  process.exit(1);
-});
+module.exports = app;
