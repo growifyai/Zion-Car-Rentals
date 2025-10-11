@@ -1134,14 +1134,6 @@ curl http://localhost:5000/api/cars
 
 ---
 
-## 📞 Support
-
-For issues or questions:
-- **Email:** support@carrental.com
-- **Documentation:** http://localhost:5000/
-
----
-
 ## 📝 Notes
 
 - All dates should be in **ISO 8601 format** (e.g., `2025-10-15T10:00:00.000Z`)
