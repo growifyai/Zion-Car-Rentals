@@ -1,8 +1,3 @@
-// ==================== CAR RENTAL SYSTEM - COMPLETE BACKEND WITH RAZORPAY ====================
-// Install dependencies first:
-// npm init -y
-// npm install express mongoose bcryptjs jsonwebtoken multer dotenv cors razorpay crypto
-
 const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
@@ -15,39 +10,31 @@ const Razorpay = require('razorpay');
 const crypto = require('crypto');
 require('dotenv').config();
 
-// ==================== CONFIGURATION ====================
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/car-rental';
 
-// Initialize Razorpay
 const razorpayInstance = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_YOUR_KEY_ID',
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'YOUR_KEY_SECRET'
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
-// Create uploads directory
 if (!fs.existsSync('./uploads')) {
   fs.mkdirSync('./uploads', { recursive: true });
 }
 
-// ==================== MONGODB CONNECTION ====================
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
-// ==================== SCHEMAS ====================
-
-// User Schema
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -57,30 +44,45 @@ const userSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Car Schema
 const carSchema = new mongoose.Schema({
-  name: { type: String, required: true },
+  carName: { type: String, required: true },
   model: { type: String, required: true },
-  type: { type: String, enum: ['normal', 'premium'], required: true },
-  pricePerHour: { type: Number, required: true },
+  brand: { type: String, required: true },
+  year: { type: Number, required: true },
+  type: { type: String, enum: ['normal', 'premium', 'luxury'], required: true },
+  gearType: { type: String, enum: ['auto', 'manual'], required: true },
+  fuelType: { type: String, enum: ['petrol', 'diesel', 'cng', 'hybrid', 'ev'], required: true },
+  seatingCapacity: { type: Number, required: true },
+  
+  pricing: {
+    price12hr: { type: Number, required: true },
+    price24hr: { type: Number, required: true },
+    price36hr: { type: Number, required: true },
+    price48hr: { type: Number, required: true },
+    price60hr: { type: Number, required: true },
+    price72hr: { type: Number, required: true }
+  },
+  
+  securityDeposit: { type: Number, required: true },
+  driverAvailable: { type: Boolean, default: false },
+  driverChargesPerDay: { type: Number, default: 0 },
+  
   description: String,
   features: [String],
   imageUrl: String,
+  registrationNumber: String,
   available: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
 
-// Booking Schema
 const bookingSchema = new mongoose.Schema({
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   carId: { type: mongoose.Schema.Types.ObjectId, ref: 'Car', required: true },
 
-  // Booking Details
   startTime: { type: Date, required: true },
-  duration: { type: Number, required: true }, // in hours (multiples of 12)
+  duration: { type: Number, required: true },
   endTime: { type: Date, required: true },
 
-  // Personal Information
   fullName: { type: String, required: true },
   guardianName: { type: String, required: true },
   guardianRelation: { type: String, enum: ['S/o', 'W/o', 'D/o'], required: true },
@@ -89,45 +91,40 @@ const bookingSchema = new mongoose.Schema({
   mobile: { type: String, required: true },
   occupation: { type: String, required: true },
 
-  // Reference Contacts
   reference1Name: { type: String, required: true },
   reference1Mobile: { type: String, required: true },
   reference2Name: { type: String, required: true },
   reference2Mobile: { type: String, required: true },
 
-  // Driving License
   drivingLicenseNumber: { type: String, required: true },
   licenseExpiryDate: { type: Date, required: true },
 
-  // Document Uploads
   drivingLicenseImage: { type: String, required: true },
   aadharCardImage: { type: String, required: true },
   livePhoto: { type: String, required: true },
 
-  // Deposit Information
   depositType: { type: String, enum: ['bike', 'cash', 'online'], required: true },
   bikeDetails: String,
   depositAmount: Number,
   depositStatus: { type: String, enum: ['pending', 'received', 'refunded'], default: 'pending' },
 
-  // Home Delivery
+  withDriver: { type: Boolean, default: false },
+  driverCharges: { type: Number, default: 0 },
+
   homeDelivery: { type: Boolean, default: false },
   deliveryAddress: String,
   deliveryDistance: Number,
   deliveryFee: { type: Number, default: 0 },
 
-  // Vehicle Data
   vehicleName: String,
   vehicleNumber: String,
   startOdometer: Number,
   endOdometer: Number,
 
-  // Pricing
   basePrice: Number,
   lateReturnFee: { type: Number, default: 0 },
   totalPrice: Number,
 
-  // Status
   status: { 
     type: String, 
     enum: ['pending', 'accepted', 'declined', 'payment_pending', 'paid', 'active', 'completed', 'cancelled'],
@@ -135,14 +132,12 @@ const bookingSchema = new mongoose.Schema({
   },
   adminNotes: String,
 
-  // Payment & Razorpay
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending' },
   razorpayOrderId: String,
   razorpayPaymentId: String,
   razorpaySignature: String,
   paymentDate: Date,
 
-  // Return Details
   actualReturnTime: Date,
   lateHours: { type: Number, default: 0 },
 
@@ -150,7 +145,6 @@ const bookingSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-// Notification Schema
 const notificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -160,13 +154,11 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Models
 const User = mongoose.model('User', userSchema);
 const Car = mongoose.model('Car', carSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
 
-// ==================== MULTER FILE UPLOAD CONFIG ====================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/');
@@ -193,7 +185,6 @@ const upload = multer({
   }
 });
 
-// ==================== MIDDLEWARE ====================
 const authenticate = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -219,17 +210,44 @@ const isAdmin = (req, res, next) => {
   next();
 };
 
-// ==================== HELPER FUNCTIONS ====================
-const calculateDeposit = (carType) => {
-  return carType === 'premium' ? 35000 : 25000;
+const calculatePriceByDuration = (car, duration, withDriver) => {
+  let basePrice = 0;
+  
+  if (duration === 12) {
+    basePrice = car.pricing.price12hr;
+  } else if (duration === 24) {
+    basePrice = car.pricing.price24hr;
+  } else if (duration === 36) {
+    basePrice = car.pricing.price36hr;
+  } else if (duration === 48) {
+    basePrice = car.pricing.price48hr;
+  } else if (duration === 60) {
+    basePrice = car.pricing.price60hr;
+  } else if (duration === 72) {
+    basePrice = car.pricing.price72hr;
+  } else {
+    const days = Math.ceil(duration / 24);
+    basePrice = car.pricing.price24hr * days;
+  }
+  
+  let driverCharges = 0;
+  if (withDriver && car.driverAvailable) {
+    const days = Math.ceil(duration / 24);
+    driverCharges = car.driverChargesPerDay * days;
+  }
+  
+  return { basePrice, driverCharges };
 };
 
-const calculatePrice = (car, duration, homeDelivery, deliveryDistance) => {
-  let price = car.pricePerHour * duration;
+const calculateTotalPrice = (car, duration, withDriver, homeDelivery, deliveryDistance) => {
+  const { basePrice, driverCharges } = calculatePriceByDuration(car, duration, withDriver);
+  let deliveryFee = 0;
+  
   if (homeDelivery && deliveryDistance <= 5) {
-    price += 500;
+    deliveryFee = 500;
   }
-  return price;
+  
+  return basePrice + driverCharges + deliveryFee;
 };
 
 const calculateLateReturnFee = (scheduledEndTime, actualReturnTime, hourlyRate = 100) => {
@@ -248,9 +266,6 @@ const createNotification = async (userId, message, bookingId = null, type = 'gen
   }
 };
 
-// ==================== AUTH ROUTES ====================
-
-// Register
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, mobile, role } = req.body;
@@ -276,7 +291,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -303,16 +317,15 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// ==================== CAR ROUTES ====================
-
-// Get all cars
 app.get('/api/cars', async (req, res) => {
   try {
-    const { type, available } = req.query;
+    const { type, available, fuelType, gearType } = req.query;
     let filter = {};
 
     if (type) filter.type = type;
     if (available !== undefined) filter.available = available === 'true';
+    if (fuelType) filter.fuelType = fuelType;
+    if (gearType) filter.gearType = gearType;
 
     const cars = await Car.find(filter).sort({ createdAt: -1 });
     res.json({ cars });
@@ -321,7 +334,6 @@ app.get('/api/cars', async (req, res) => {
   }
 });
 
-// Get single car
 app.get('/api/cars/:id', async (req, res) => {
   try {
     const car = await Car.findById(req.params.id);
@@ -334,11 +346,25 @@ app.get('/api/cars/:id', async (req, res) => {
   }
 });
 
-// Add car (Admin)
 app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
   try {
-    const { name, model, type, pricePerHour, description, features, imageUrl } = req.body;
-    const car = new Car({ name, model, type, pricePerHour, description, features, imageUrl });
+    const { 
+      carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
+      pricing, securityDeposit, driverAvailable, driverChargesPerDay,
+      description, features, imageUrl, registrationNumber
+    } = req.body;
+
+    if (!pricing || !pricing.price12hr || !pricing.price24hr || !pricing.price36hr || 
+        !pricing.price48hr || !pricing.price60hr || !pricing.price72hr) {
+      return res.status(400).json({ error: 'All pricing tiers (12hr, 24hr, 36hr, 48hr, 60hr, 72hr) are required' });
+    }
+
+    const car = new Car({ 
+      carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
+      pricing, securityDeposit, driverAvailable, driverChargesPerDay,
+      description, features, imageUrl, registrationNumber
+    });
+    
     await car.save();
     res.status(201).json({ message: 'Car added successfully', car });
   } catch (error) {
@@ -346,7 +372,6 @@ app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// Update car (Admin)
 app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const car = await Car.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
@@ -359,7 +384,6 @@ app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// Delete car (Admin)
 app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const car = await Car.findByIdAndDelete(req.params.id);
@@ -372,9 +396,6 @@ app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// ==================== BOOKING ROUTES ====================
-
-// Create booking with file uploads
 app.post('/api/bookings', 
   authenticate,
   upload.fields([
@@ -389,10 +410,9 @@ app.post('/api/bookings',
         residentialAddress, email, mobile, occupation,
         reference1Name, reference1Mobile, reference2Name, reference2Mobile,
         drivingLicenseNumber, licenseExpiryDate,
-        depositType, bikeDetails, homeDelivery, deliveryAddress, deliveryDistance
+        depositType, bikeDetails, withDriver, homeDelivery, deliveryAddress, deliveryDistance
       } = req.body;
 
-      // Validate duration
       if (duration % 12 !== 0) {
         return res.status(400).json({ error: 'Duration must be in multiples of 12 hours' });
       }
@@ -405,15 +425,22 @@ app.post('/api/bookings',
         return res.status(400).json({ error: 'Car is not available' });
       }
 
+      if (withDriver === 'true' && !car.driverAvailable) {
+        return res.status(400).json({ error: 'Driver service not available for this car' });
+      }
+
       if (!req.files.drivingLicense || !req.files.aadharCard || !req.files.livePhoto) {
         return res.status(400).json({ error: 'All documents (Driving License, Aadhar, Live Photo) are required' });
       }
 
       const start = new Date(startTime);
       const end = new Date(start.getTime() + (duration * 60 * 60 * 1000));
-      const depositAmount = calculateDeposit(car.type);
-      const deliveryFee = (homeDelivery && deliveryDistance <= 5) ? 500 : 0;
-      const basePrice = calculatePrice(car, duration, homeDelivery, deliveryDistance);
+      const depositAmount = car.securityDeposit;
+      
+      const deliveryFee = (homeDelivery === 'true' && deliveryDistance <= 5) ? 500 : 0;
+      const totalPrice = calculateTotalPrice(car, parseInt(duration), withDriver === 'true', homeDelivery === 'true', parseFloat(deliveryDistance || 0));
+      
+      const { basePrice, driverCharges } = calculatePriceByDuration(car, parseInt(duration), withDriver === 'true');
 
       const booking = new Booking({
         customerId: req.userId,
@@ -431,12 +458,14 @@ app.post('/api/bookings',
         depositType,
         bikeDetails: depositType === 'bike' ? bikeDetails : null,
         depositAmount,
+        withDriver: withDriver === 'true',
+        driverCharges,
         homeDelivery: homeDelivery === 'true',
-        deliveryAddress: homeDelivery ? deliveryAddress : null,
-        deliveryDistance: homeDelivery ? parseFloat(deliveryDistance) : 0,
+        deliveryAddress: homeDelivery === 'true' ? deliveryAddress : null,
+        deliveryDistance: homeDelivery === 'true' ? parseFloat(deliveryDistance) : 0,
         deliveryFee,
         basePrice,
-        totalPrice: basePrice,
+        totalPrice,
         status: 'pending'
       });
 
@@ -444,7 +473,7 @@ app.post('/api/bookings',
 
       await createNotification(
         req.userId,
-        `New booking request submitted for ${car.name}`,
+        `New booking request submitted for ${car.carName}`,
         booking._id,
         'booking_update'
       );
@@ -459,11 +488,10 @@ app.post('/api/bookings',
     }
 });
 
-// Get customer's bookings
 app.get('/api/bookings/my-bookings', authenticate, async (req, res) => {
   try {
     const bookings = await Booking.find({ customerId: req.userId })
-      .populate('carId', 'name model type imageUrl')
+      .populate('carId', 'carName model type imageUrl gearType fuelType')
       .sort({ createdAt: -1 });
     res.json({ bookings });
   } catch (error) {
@@ -471,7 +499,6 @@ app.get('/api/bookings/my-bookings', authenticate, async (req, res) => {
   }
 });
 
-// Get all bookings (Admin)
 app.get('/api/bookings', authenticate, isAdmin, async (req, res) => {
   try {
     const { status } = req.query;
@@ -480,7 +507,7 @@ app.get('/api/bookings', authenticate, isAdmin, async (req, res) => {
 
     const bookings = await Booking.find(filter)
       .populate('customerId', 'name email mobile')
-      .populate('carId', 'name model type')
+      .populate('carId', 'carName model type gearType fuelType')
       .sort({ createdAt: -1 });
     res.json({ bookings });
   } catch (error) {
@@ -488,7 +515,6 @@ app.get('/api/bookings', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// Get single booking
 app.get('/api/bookings/:id', authenticate, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id)
@@ -509,7 +535,6 @@ app.get('/api/bookings/:id', authenticate, async (req, res) => {
   }
 });
 
-// Admin: Accept/Decline booking
 app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
   try {
     const { action, adminNotes } = req.body;
@@ -529,7 +554,7 @@ app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
 
       await createNotification(
         booking.customerId,
-        `Your booking for ${booking.carId.name} has been accepted! Please proceed with payment.`,
+        `Your booking for ${booking.carId.carName} has been accepted! Please proceed with payment.`,
         booking._id,
         'booking_update'
       );
@@ -545,7 +570,7 @@ app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
 
       await createNotification(
         booking.customerId,
-        `Your booking for ${booking.carId.name} has been declined. Reason: ${adminNotes}`,
+        `Your booking for ${booking.carId.carName} has been declined. Reason: ${adminNotes}`,
         booking._id,
         'booking_update'
       );
@@ -560,7 +585,6 @@ app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// Admin: Start rental
 app.put('/api/bookings/:id/start', authenticate, isAdmin, async (req, res) => {
   try {
     const { vehicleName, vehicleNumber, startOdometer } = req.body;
@@ -595,7 +619,6 @@ app.put('/api/bookings/:id/start', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// Admin: Complete booking
 app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) => {
   try {
     const { endOdometer, actualReturnTime } = req.body;
@@ -618,12 +641,12 @@ app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) =>
     booking.actualReturnTime = returnTime;
     booking.lateReturnFee = lateFee;
     booking.lateHours = lateHours;
-    booking.totalPrice = booking.basePrice + lateFee;
+    booking.totalPrice = booking.basePrice + booking.driverCharges + booking.deliveryFee + lateFee;
     booking.depositStatus = 'refunded';
 
     await Car.findByIdAndUpdate(booking.carId, { available: true });
 
-    let message = `Your rental for ${booking.carId.name} is completed.`;
+    let message = `Your rental for ${booking.carId.carName} is completed.`;
     if (lateFee > 0) {
       message += ` Late return fee of ₹${lateFee} has been charged (${lateHours} hours late).`;
     }
@@ -638,9 +661,6 @@ app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) =>
   }
 });
 
-// ==================== RAZORPAY PAYMENT ROUTES ====================
-
-// Create Razorpay Order
 app.post('/api/payment/create-order', authenticate, async (req, res) => {
   try {
     const { bookingId } = req.body;
@@ -665,7 +685,7 @@ app.post('/api/payment/create-order', authenticate, async (req, res) => {
       notes: {
         bookingId: bookingId.toString(),
         customerId: req.userId.toString(),
-        carName: booking.carId.name,
+        carName: booking.carId.carName,
         duration: booking.duration,
         depositAmount: booking.depositAmount
       }
@@ -682,7 +702,7 @@ app.post('/api/payment/create-order', authenticate, async (req, res) => {
       order: razorpayOrder,
       bookingDetails: {
         amount: booking.totalPrice,
-        carName: booking.carId.name,
+        carName: booking.carId.carName,
         duration: booking.duration,
         depositAmount: booking.depositAmount
       },
@@ -695,7 +715,6 @@ app.post('/api/payment/create-order', authenticate, async (req, res) => {
   }
 });
 
-// Verify Razorpay Payment
 app.post('/api/payment/verify', authenticate, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
@@ -730,7 +749,7 @@ app.post('/api/payment/verify', authenticate, async (req, res) => {
 
     await createNotification(
       booking.customerId,
-      `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.name}. Booking confirmed!`,
+      `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.carName}. Booking confirmed!`,
       booking._id,
       'payment'
     );
@@ -743,7 +762,6 @@ app.post('/api/payment/verify', authenticate, async (req, res) => {
   }
 });
 
-// Razorpay Webhook
 app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const webhookSignature = req.headers['x-razorpay-signature'];
@@ -776,7 +794,7 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
           await Car.findByIdAndUpdate(booking.carId, { available: false });
           await createNotification(
             booking.customerId,
-            `Payment of ₹${paymentEntity.amount / 100} confirmed for ${booking.carId.name}!`,
+            `Payment of ₹${paymentEntity.amount / 100} confirmed for ${booking.carId.carName}!`,
             booking._id,
             'payment'
           );
@@ -791,7 +809,7 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
           await failedBooking.save();
           await createNotification(
             failedBooking.customerId,
-            `Payment failed for ${failedBooking.carId.name}. Please try again.`,
+            `Payment failed for ${failedBooking.carId.carName}. Please try again.`,
             failedBooking._id,
             'payment'
           );
@@ -810,7 +828,6 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
   }
 });
 
-// Get Payment Details
 app.get('/api/payment/:paymentId', authenticate, async (req, res) => {
   try {
     const payment = await razorpayInstance.payments.fetch(req.params.paymentId);
@@ -820,7 +837,6 @@ app.get('/api/payment/:paymentId', authenticate, async (req, res) => {
   }
 });
 
-// Refund Payment (Admin)
 app.post('/api/payment/refund', authenticate, isAdmin, async (req, res) => {
   try {
     const { paymentId, amount } = req.body;
@@ -836,9 +852,6 @@ app.post('/api/payment/refund', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// ==================== NOTIFICATION ROUTES ====================
-
-// Get user notifications
 app.get('/api/notifications', authenticate, async (req, res) => {
   try {
     const notifications = await Notification.find({ userId: req.userId })
@@ -850,7 +863,6 @@ app.get('/api/notifications', authenticate, async (req, res) => {
   }
 });
 
-// Mark notification as read
 app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
   try {
     const notification = await Notification.findOneAndUpdate(
@@ -868,8 +880,6 @@ app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// ==================== ADMIN ANALYTICS ====================
 
 app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   try {
@@ -901,85 +911,58 @@ app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   }
 });
 
-// ==================== ROOT ROUTE ====================
-
 app.get('/', (req, res) => {
   res.json({
     message: '🚗 Car Rental System API with Razorpay',
     version: '2.0.0',
     endpoints: {
       auth: [
-        'POST /api/auth/register - Register new user',
-        'POST /api/auth/login - Login user'
+        'POST /api/auth/register',
+        'POST /api/auth/login'
       ],
       cars: [
-        'GET /api/cars - Get all cars',
-        'GET /api/cars/:id - Get single car',
-        'POST /api/cars - Add car (admin)',
-        'PUT /api/cars/:id - Update car (admin)',
-        'DELETE /api/cars/:id - Delete car (admin)'
+        'GET /api/cars',
+        'GET /api/cars/:id',
+        'POST /api/cars',
+        'PUT /api/cars/:id',
+        'DELETE /api/cars/:id'
       ],
       bookings: [
-        'POST /api/bookings - Create booking with documents',
-        'GET /api/bookings/my-bookings - Get customer bookings',
-        'GET /api/bookings/:id - Get single booking',
-        'GET /api/bookings - Get all bookings (admin)',
-        'PUT /api/bookings/:id/review - Accept/Decline booking (admin)',
-        'PUT /api/bookings/:id/start - Start rental (admin)',
-        'PUT /api/bookings/:id/complete - Complete rental (admin)'
+        'POST /api/bookings',
+        'GET /api/bookings/my-bookings',
+        'GET /api/bookings/:id',
+        'GET /api/bookings',
+        'PUT /api/bookings/:id/review',
+        'PUT /api/bookings/:id/start',
+        'PUT /api/bookings/:id/complete'
       ],
       payment: [
-        'POST /api/payment/create-order - Create Razorpay order',
-        'POST /api/payment/verify - Verify payment signature',
-        'POST /api/payment/webhook - Razorpay webhook',
-        'GET /api/payment/:paymentId - Get payment details',
-        'POST /api/payment/refund - Refund payment (admin)'
+        'POST /api/payment/create-order',
+        'POST /api/payment/verify',
+        'POST /api/payment/webhook',
+        'GET /api/payment/:paymentId',
+        'POST /api/payment/refund'
       ],
       notifications: [
-        'GET /api/notifications - Get user notifications',
-        'PUT /api/notifications/:id/read - Mark as read'
+        'GET /api/notifications',
+        'PUT /api/notifications/:id/read'
       ],
       admin: [
-        'GET /api/admin/stats - Get dashboard statistics'
+        'GET /api/admin/stats'
       ]
     }
   });
 });
-
-// ==================== ERROR HANDLER ====================
 
 app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-// ==================== START SERVER ====================
-
 app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════════════════════╗
-║   🚗 CAR RENTAL SYSTEM WITH RAZORPAY RUNNING         ║
-║   Port: ${PORT}                                        
-║   MongoDB: ${MONGODB_URI}                             
-║   Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured'}
-╚═══════════════════════════════════════════════════════╝
-
-📝 Setup Instructions:
-1. Create .env file with:
-   - RAZORPAY_KEY_ID=rzp_test_xxxxx
-   - RAZORPAY_KEY_SECRET=xxxxxx
-   - RAZORPAY_WEBHOOK_SECRET=xxxxx
-   - JWT_SECRET=your-secret
-   - MONGODB_URI=mongodb://localhost:27017/car-rental
-
-2. Start MongoDB server
-
-3. Test with Razorpay test credentials:
-   - Card: 4111 1111 1111 1111
-   - UPI: success@razorpay
-
-🚀 Server ready!
-  `);
+  console.log(`🚗 CAR RENTAL SYSTEM RUNNING ON PORT ${PORT}`);
+  console.log(`MongoDB: ${MONGODB_URI}`);
+  console.log(`Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured'}`);
 });
 
 module.exports = app;
