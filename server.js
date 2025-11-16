@@ -6,19 +6,24 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
+const { randomUUID } = require('crypto');
 require('dotenv').config();
+
+// PhonePe SDK Import
+const { StandardCheckoutClient, Env, StandardCheckoutPayRequest, MetaInfo, RefundRequest } = require('pg-sdk-node');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/car-rental';
 
-const razorpayInstance = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_YOUR_KEY_ID',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'YOUR_KEY_SECRET'
-});
+// PhonePe Client Initialization
+const phonePeClient = StandardCheckoutClient.getInstance(
+  process.env.PHONEPE_CLIENT_ID || '<your_client_id>',
+  process.env.PHONEPE_CLIENT_SECRET || '<your_client_secret>',
+  process.env.PHONEPE_CLIENT_VERSION || 'v1',
+  process.env.NODE_ENV === 'production' ? Env.PRODUCTION : Env.SANDBOX
+);
 
 app.use(cors());
 app.use(express.json());
@@ -34,6 +39,8 @@ mongoose.connect(MONGODB_URI, {
   useUnifiedTopology: true
 }).then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// ==================== SCHEMAS ====================
 
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -132,10 +139,11 @@ const bookingSchema = new mongoose.Schema({
   },
   adminNotes: String,
 
+  // PhonePe Payment Fields (replaced Razorpay fields)
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending' },
-  razorpayOrderId: String,
-  razorpayPaymentId: String,
-  razorpaySignature: String,
+  phonePeOrderId: String,              // PhonePe's internal order ID
+  merchantOrderId: String,             // Our unique merchant order ID
+  phonePeTransactionId: String,        // PhonePe transaction ID
   paymentDate: Date,
 
   actualReturnTime: Date,
@@ -158,6 +166,8 @@ const User = mongoose.model('User', userSchema);
 const Car = mongoose.model('Car', carSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
+
+// ==================== MULTER SETUP ====================
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -185,6 +195,8 @@ const upload = multer({
   }
 });
 
+// ==================== MIDDLEWARE ====================
+
 const authenticate = async (req, res, next) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -209,6 +221,8 @@ const isAdmin = (req, res, next) => {
   }
   next();
 };
+
+// ==================== HELPER FUNCTIONS ====================
 
 const calculatePriceByDuration = (car, duration, withDriver) => {
   let basePrice = 0;
@@ -266,6 +280,8 @@ const createNotification = async (userId, message, bookingId = null, type = 'gen
   }
 };
 
+// ==================== AUTH ROUTES ====================
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, mobile, role } = req.body;
@@ -316,6 +332,8 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==================== CAR ROUTES ====================
 
 app.get('/api/cars', async (req, res) => {
   try {
@@ -395,6 +413,8 @@ app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==================== BOOKING ROUTES ====================
 
 app.post('/api/bookings', 
   authenticate,
@@ -661,6 +681,9 @@ app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) =>
   }
 });
 
+// ==================== PHONEPE PAYMENT ROUTES ====================
+
+// Create Payment Order with PhonePe
 app.post('/api/payment/create-order', authenticate, async (req, res) => {
   try {
     const { bookingId } = req.body;
@@ -678,135 +701,181 @@ app.post('/api/payment/create-order', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Booking must be accepted by admin before payment' });
     }
 
-    const options = {
-      amount: booking.totalPrice * 100,
-      currency: 'INR',
-      receipt: `booking_${bookingId}`,
-      notes: {
-        bookingId: bookingId.toString(),
-        customerId: req.userId.toString(),
-        carName: booking.carId.carName,
-        duration: booking.duration,
-        depositAmount: booking.depositAmount
-      }
-    };
+    // Generate unique merchant order ID
+    const merchantOrderId = randomUUID();
+    
+    // Amount in paisa (PhonePe requires amount in smallest currency unit)
+    const amountInPaisa = booking.totalPrice * 100;
 
-    const razorpayOrder = await razorpayInstance.orders.create(options);
+    // Redirect URL - where user returns after payment
+    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/callback`;
 
-    booking.razorpayOrderId = razorpayOrder.id;
+    // Create meta info for tracking
+    const metaInfo = MetaInfo.builder()
+      .udf1(bookingId.toString())
+      .udf2(booking.carId.carName)
+      .udf3(req.userId.toString())
+      .udf4(`Duration: ${booking.duration}hrs`)
+      .udf5(`Deposit: ₹${booking.depositAmount}`)
+      .build();
+
+    // Build payment request
+    const paymentRequest = StandardCheckoutPayRequest.builder()
+      .merchantOrderId(merchantOrderId)
+      .amount(amountInPaisa)
+      .redirectUrl(redirectUrl)
+      .metaInfo(metaInfo)
+      .build();
+
+    // Initiate payment with PhonePe
+    const paymentResponse = await phonePeClient.pay(paymentRequest);
+
+    // Save PhonePe details to booking
+    booking.merchantOrderId = merchantOrderId;
+    booking.phonePeOrderId = paymentResponse.orderId;
     booking.updatedAt = Date.now();
     await booking.save();
 
     res.json({
       success: true,
-      order: razorpayOrder,
+      redirectUrl: paymentResponse.redirectUrl,
+      orderId: paymentResponse.orderId,
+      merchantOrderId: merchantOrderId,
+      state: paymentResponse.state,
+      expireAt: paymentResponse.expireAt,
       bookingDetails: {
         amount: booking.totalPrice,
         carName: booking.carId.carName,
         duration: booking.duration,
         depositAmount: booking.depositAmount
-      },
-      razorpayKeyId: process.env.RAZORPAY_KEY_ID
+      }
     });
 
   } catch (error) {
-    console.error('Razorpay order creation error:', error);
+    console.error('PhonePe order creation error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/payment/verify', authenticate, async (req, res) => {
+// Check Payment Status
+app.get('/api/payment/status/:merchantOrderId', authenticate, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
+    const { merchantOrderId } = req.params;
 
-    const body = razorpay_order_id + '|' + razorpay_payment_id;
-    const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(body.toString())
-      .digest('hex');
-
-    const isAuthentic = expectedSignature === razorpay_signature;
-
-    if (!isAuthentic) {
-      return res.status(400).json({ success: false, error: 'Payment verification failed - Invalid signature' });
-    }
-
-    const booking = await Booking.findById(bookingId).populate('carId');
+    const booking = await Booking.findOne({ merchantOrderId }).populate('carId');
     if (!booking) {
       return res.status(404).json({ error: 'Booking not found' });
     }
 
-    booking.status = 'paid';
-    booking.paymentStatus = 'completed';
-    booking.razorpayPaymentId = razorpay_payment_id;
-    booking.razorpayOrderId = razorpay_order_id;
-    booking.razorpaySignature = razorpay_signature;
-    booking.paymentDate = new Date();
-    booking.updatedAt = Date.now();
+    if (booking.customerId.toString() !== req.userId.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
 
-    await booking.save();
-    await Car.findByIdAndUpdate(booking.carId, { available: false });
+    // Get order status from PhonePe
+    const statusResponse = await phonePeClient.getOrderStatus(merchantOrderId);
 
-    await createNotification(
-      booking.customerId,
-      `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.carName}. Booking confirmed!`,
-      booking._id,
-      'payment'
-    );
+    // Update booking based on payment status
+    if (statusResponse.state === 'COMPLETED' && booking.status === 'payment_pending') {
+      booking.status = 'paid';
+      booking.paymentStatus = 'completed';
+      booking.phonePeOrderId = statusResponse.orderId;
+      
+      // Get transaction ID from payment details
+      if (statusResponse.paymentDetails && statusResponse.paymentDetails.length > 0) {
+        booking.phonePeTransactionId = statusResponse.paymentDetails[0].transactionId;
+      }
+      
+      booking.paymentDate = new Date();
+      booking.updatedAt = Date.now();
 
-    res.json({ success: true, message: 'Payment verified successfully!', booking });
+      await booking.save();
+      await Car.findByIdAndUpdate(booking.carId, { available: false });
+
+      await createNotification(
+        booking.customerId,
+        `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.carName}. Booking confirmed!`,
+        booking._id,
+        'payment'
+      );
+    } else if (statusResponse.state === 'FAILED') {
+      booking.paymentStatus = 'failed';
+      await booking.save();
+    }
+
+    res.json({
+      success: true,
+      status: statusResponse.state,
+      orderDetails: statusResponse,
+      bookingStatus: booking.status
+    });
 
   } catch (error) {
-    console.error('Payment verification error:', error);
+    console.error('Payment status check error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+// PhonePe Webhook Handler
+app.post('/api/payment/webhook', express.json(), async (req, res) => {
   try {
-    const webhookSignature = req.headers['x-razorpay-signature'];
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const authHeader = req.headers['authorization'];
+    const responseBody = JSON.stringify(req.body);
 
-    const expectedSignature = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(JSON.stringify(req.body))
-      .digest('hex');
+    // Get webhook credentials from environment
+    const webhookUsername = process.env.PHONEPE_WEBHOOK_USERNAME;
+    const webhookPassword = process.env.PHONEPE_WEBHOOK_PASSWORD;
 
-    if (webhookSignature !== expectedSignature) {
-      return res.status(400).json({ error: 'Invalid webhook signature' });
-    }
+    // Validate webhook callback
+    const callbackResponse = phonePeClient.validateCallback(
+      webhookUsername,
+      webhookPassword,
+      authHeader,
+      responseBody
+    );
 
-    const event = req.body.event;
-    const paymentEntity = req.body.payload.payment.entity;
+    console.log('PhonePe Webhook Event:', callbackResponse.type);
 
-    console.log('Webhook Event:', event);
+    const payload = callbackResponse.payload;
 
-    switch (event) {
-      case 'payment.authorized':
-        const bookingId = paymentEntity.notes.bookingId;
-        const booking = await Booking.findById(bookingId).populate('carId');
+    // Handle different callback types
+    switch (callbackResponse.type) {
+      case 'CHECKOUT_ORDER_COMPLETED':
+        // Payment successful
+        const booking = await Booking.findOne({ merchantOrderId: payload.originalMerchantOrderId }).populate('carId');
+        
         if (booking) {
           booking.status = 'paid';
           booking.paymentStatus = 'completed';
-          booking.razorpayPaymentId = paymentEntity.id;
+          booking.phonePeOrderId = payload.orderId;
+          
+          if (payload.paymentDetails && payload.paymentDetails.length > 0) {
+            booking.phonePeTransactionId = payload.paymentDetails[0].transactionId;
+          }
+          
           booking.paymentDate = new Date();
+          booking.updatedAt = Date.now();
+          
           await booking.save();
           await Car.findByIdAndUpdate(booking.carId, { available: false });
+
           await createNotification(
             booking.customerId,
-            `Payment of ₹${paymentEntity.amount / 100} confirmed for ${booking.carId.carName}!`,
+            `Payment of ₹${booking.totalPrice} confirmed for ${booking.carId.carName}!`,
             booking._id,
             'payment'
           );
         }
         break;
 
-      case 'payment.failed':
-        const failedBookingId = paymentEntity.notes.bookingId;
-        const failedBooking = await Booking.findById(failedBookingId).populate('carId');
+      case 'CHECKOUT_ORDER_FAILED':
+        // Payment failed
+        const failedBooking = await Booking.findOne({ merchantOrderId: payload.originalMerchantOrderId }).populate('carId');
+        
         if (failedBooking) {
           failedBooking.paymentStatus = 'failed';
+          failedBooking.updatedAt = Date.now();
           await failedBooking.save();
+
           await createNotification(
             failedBooking.customerId,
             `Payment failed for ${failedBooking.carId.carName}. Please try again.`,
@@ -816,8 +885,23 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
         }
         break;
 
+      case 'PG_REFUND_COMPLETED':
+        // Refund completed
+        console.log('Refund completed:', payload.merchantRefundId);
+        break;
+
+      case 'PG_REFUND_FAILED':
+        // Refund failed
+        console.log('Refund failed:', payload.merchantRefundId);
+        break;
+
+      case 'PG_REFUND_ACCEPTED':
+        // Refund accepted but not completed yet
+        console.log('Refund accepted:', payload.merchantRefundId);
+        break;
+
       default:
-        console.log('Unhandled webhook event:', event);
+        console.log('Unhandled webhook event:', callbackResponse.type);
     }
 
     res.json({ status: 'ok' });
@@ -828,29 +912,71 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
   }
 });
 
-app.get('/api/payment/:paymentId', authenticate, async (req, res) => {
-  try {
-    const payment = await razorpayInstance.payments.fetch(req.params.paymentId);
-    res.json({ success: true, payment });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
+// Initiate Refund
 app.post('/api/payment/refund', authenticate, isAdmin, async (req, res) => {
   try {
-    const { paymentId, amount } = req.body;
+    const { bookingId, amount } = req.body;
 
-    const refund = await razorpayInstance.payments.refund(paymentId, {
-      amount: amount * 100,
-      speed: 'normal'
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    if (!booking.merchantOrderId) {
+      return res.status(400).json({ error: 'No payment found for this booking' });
+    }
+
+    // Generate unique refund ID
+    const merchantRefundId = randomUUID();
+    
+    // Amount in paisa
+    const refundAmountInPaisa = amount * 100;
+
+    // Build refund request
+    const refundRequest = RefundRequest.builder()
+      .merchantRefundId(merchantRefundId)
+      .originalMerchantOrderId(booking.merchantOrderId)
+      .amount(refundAmountInPaisa)
+      .build();
+
+    // Initiate refund with PhonePe
+    const refundResponse = await phonePeClient.refund(refundRequest);
+
+    res.json({
+      success: true,
+      message: 'Refund initiated successfully',
+      refundId: refundResponse.refundId,
+      merchantRefundId: merchantRefundId,
+      state: refundResponse.state,
+      amount: refundResponse.amount / 100
     });
 
-    res.json({ success: true, message: 'Refund initiated successfully', refund });
   } catch (error) {
+    console.error('Refund initiation error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
+// Check Refund Status
+app.get('/api/payment/refund/status/:merchantRefundId', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { merchantRefundId } = req.params;
+
+    // Get refund status from PhonePe
+    const refundStatus = await phonePeClient.getRefundStatus(merchantRefundId);
+
+    res.json({
+      success: true,
+      refundStatus
+    });
+
+  } catch (error) {
+    console.error('Refund status check error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== NOTIFICATION ROUTES ====================
 
 app.get('/api/notifications', authenticate, async (req, res) => {
   try {
@@ -880,6 +1006,8 @@ app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==================== ADMIN STATS ====================
 
 app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   try {
@@ -911,9 +1039,11 @@ app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   }
 });
 
+// ==================== HOME ROUTE ====================
+
 app.get('/', (req, res) => {
   res.json({
-    message: '🚗 Car Rental System API with Razorpay',
+    message: '🚗 Car Rental System API with PhonePe',
     version: '2.0.0',
     endpoints: {
       auth: [
@@ -938,10 +1068,10 @@ app.get('/', (req, res) => {
       ],
       payment: [
         'POST /api/payment/create-order',
-        'POST /api/payment/verify',
+        'GET /api/payment/status/:merchantOrderId',
         'POST /api/payment/webhook',
-        'GET /api/payment/:paymentId',
-        'POST /api/payment/refund'
+        'POST /api/payment/refund',
+        'GET /api/payment/refund/status/:merchantRefundId'
       ],
       notifications: [
         'GET /api/notifications',
@@ -954,15 +1084,20 @@ app.get('/', (req, res) => {
   });
 });
 
+// ==================== ERROR HANDLER ====================
+
 app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
+// ==================== START SERVER ====================
+
 app.listen(PORT, () => {
   console.log(`🚗 CAR RENTAL SYSTEM RUNNING ON PORT ${PORT}`);
   console.log(`MongoDB: ${MONGODB_URI}`);
-  console.log(`Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured'}`);
+  console.log(`PhonePe Environment: ${process.env.NODE_ENV === 'production' ? 'PRODUCTION' : 'SANDBOX'}`);
+  console.log(`PhonePe: ${process.env.PHONEPE_CLIENT_ID ? '✅ Configured' : '❌ Not Configured'}`);
 });
 
 module.exports = app;
