@@ -6,24 +6,36 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
-const { randomUUID } = require('crypto');
 require('dotenv').config();
-
-// PhonePe SDK Import
-const { StandardCheckoutClient, Env, StandardCheckoutPayRequest, MetaInfo, RefundRequest } = require('pg-sdk-node');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/car-rental';
 
-// PhonePe Client Initialization
-const phonePeClient = StandardCheckoutClient.getInstance(
-  process.env.PHONEPE_CLIENT_ID || '<your_client_id>',
-  process.env.PHONEPE_CLIENT_SECRET || '<your_client_secret>',
-  process.env.PHONEPE_CLIENT_VERSION || 'v1',
-  process.env.NODE_ENV === 'production' ? Env.PRODUCTION : Env.SANDBOX
-);
+// Initialize Razorpay only if keys are provided
+let razorpay = null;
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && 
+    RAZORPAY_KEY_ID !== 'your_razorpay_key_id_here' && 
+    RAZORPAY_KEY_SECRET !== 'your_razorpay_key_secret_here') {
+  try {
+    const Razorpay = require('razorpay');
+    razorpay = new Razorpay({
+      key_id: RAZORPAY_KEY_ID,
+      key_secret: RAZORPAY_KEY_SECRET,
+    });
+    console.log('✅ Razorpay initialized successfully');
+  } catch (error) {
+    console.error('❌ Razorpay initialization error:', error.message);
+    console.log('⚠️  Payment gateway will not be available. Please check your Razorpay keys in .env');
+  }
+} else {
+  console.log('⚠️  Razorpay keys not configured. Please add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to .env');
+  console.log('   Payment gateway will not be available until keys are configured.');
+}
 
 app.use(cors());
 app.use(express.json());
@@ -34,11 +46,38 @@ if (!fs.existsSync('./uploads')) {
   fs.mkdirSync('./uploads', { recursive: true });
 }
 
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log('✅ MongoDB Connected'))
-  .catch(err => console.error('❌ MongoDB Connection Error:', err));
+if (!fs.existsSync('./uploads/receipts')) {
+  fs.mkdirSync('./uploads/receipts', { recursive: true });
+}
+
+// MongoDB connection with retry logic
+const connectMongoDB = async () => {
+  try {
+    await mongoose.connect(MONGODB_URI);
+    console.log('✅ MongoDB Connected');
+  } catch (err) {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    console.log('⚠️  Server will continue running but database operations will fail.');
+    console.log('💡 To fix: Start MongoDB service with: sudo systemctl start mongod');
+    console.log('   Or install MongoDB if not installed.');
+  }
+};
+
+// Connect to MongoDB
+connectMongoDB();
+
+// Handle MongoDB connection events
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️  MongoDB disconnected. Attempting to reconnect...');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB Error:', err.message);
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('✅ MongoDB reconnected');
+});
 
 // ==================== SCHEMAS ====================
 
@@ -48,6 +87,8 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   mobile: { type: String, required: true },
   role: { type: String, enum: ['customer', 'admin'], default: 'customer' },
+  resetPasswordToken: String,
+  resetPasswordExpires: Date,
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -71,12 +112,14 @@ const carSchema = new mongoose.Schema({
   },
   
   securityDeposit: { type: Number, required: true },
+  advanceAmount: { type: Number, required: true, default: 500 },
   driverAvailable: { type: Boolean, default: false },
   driverChargesPerDay: { type: Number, default: 0 },
   
   description: String,
   features: [String],
-  imageUrl: String,
+  imageUrl: String, // Keep for backward compatibility
+  images: [{ type: String }], // New: Multiple images array
   registrationNumber: String,
   available: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
@@ -98,19 +141,19 @@ const bookingSchema = new mongoose.Schema({
   mobile: { type: String, required: true },
   occupation: { type: String, required: true },
 
-  reference1Name: { type: String, required: true },
-  reference1Mobile: { type: String, required: true },
-  reference2Name: { type: String, required: true },
-  reference2Mobile: { type: String, required: true },
+  reference1Name: { type: String },
+  reference1Mobile: { type: String },
+  reference2Name: { type: String },
+  reference2Mobile: { type: String },
 
   drivingLicenseNumber: { type: String, required: true },
   licenseExpiryDate: { type: Date, required: true },
 
-  drivingLicenseImage: { type: String, required: true },
-  aadharCardImage: { type: String, required: true },
-  livePhoto: { type: String, required: true },
+  drivingLicenseImage: { type: String },
+  aadharCardImage: { type: String },
+  livePhoto: { type: String },
 
-  depositType: { type: String, enum: ['bike', 'cash', 'online'], required: true },
+  depositType: { type: String, enum: ['bike', 'cash'], required: true },
   bikeDetails: String,
   depositAmount: Number,
   depositStatus: { type: String, enum: ['pending', 'received', 'refunded'], default: 'pending' },
@@ -134,20 +177,23 @@ const bookingSchema = new mongoose.Schema({
 
   status: { 
     type: String, 
-    enum: ['pending', 'accepted', 'declined', 'payment_pending', 'paid', 'active', 'completed', 'cancelled'],
-    default: 'pending'
+    enum: ['advance_paid', 'verified', 'rejected', 'active', 'completed'],
+    default: 'advance_paid'
   },
+  advanceAmount: Number,
+  advancePaymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  advancePaymentDate: Date,
   adminNotes: String,
+  verificationDate: Date,
+  rejectionReason: String,
 
-  // PhonePe Payment Fields (replaced Razorpay fields)
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending' },
-  phonePeOrderId: String,              // PhonePe's internal order ID
-  merchantOrderId: String,             // Our unique merchant order ID
-  phonePeTransactionId: String,        // PhonePe transaction ID
   paymentDate: Date,
 
   actualReturnTime: Date,
   lateHours: { type: Number, default: 0 },
+
+  receiptPdfUrl: { type: String },
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -162,10 +208,52 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+const updateSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  message: { type: String, required: true },
+  active: { type: Boolean, default: true },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  expiryDate: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const updateReadSchema = new mongoose.Schema({
+  updateId: { type: mongoose.Schema.Types.ObjectId, ref: 'Update', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  readAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
+}, {
+  unique: true // Ensure a user can only have one read record per update
+});
+
+updateReadSchema.index({ updateId: 1, userId: 1 }, { unique: true });
+
+const heroVideoSchema = new mongoose.Schema({
+  videoUrl: { type: String, required: true },
+  active: { type: Boolean, default: true },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const offerBannerSchema = new mongoose.Schema({
+  imageUrl: { type: String, required: true },
+  title: { type: String },
+  description: { type: String },
+  active: { type: Boolean, default: true },
+  linkUrl: { type: String },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
 const User = mongoose.model('User', userSchema);
 const Car = mongoose.model('Car', carSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
+const Update = mongoose.model('Update', updateSchema);
+const UpdateRead = mongoose.model('UpdateRead', updateReadSchema);
+const HeroVideo = mongoose.model('HeroVideo', heroVideoSchema);
+const OfferBanner = mongoose.model('OfferBanner', offerBannerSchema);
 
 // ==================== MULTER SETUP ====================
 
@@ -218,6 +306,17 @@ const authenticate = async (req, res, next) => {
 const isAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+};
+
+// Middleware to check MongoDB connection
+const checkMongoConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ 
+      error: 'Database not connected. Please check MongoDB service.',
+      details: 'MongoDB connection is required for this operation. Please ensure MongoDB is running.'
+    });
   }
   next();
 };
@@ -280,6 +379,177 @@ const createNotification = async (userId, message, bookingId = null, type = 'gen
   }
 };
 
+// Generate PDF receipt for booking
+const generateReceiptPDF = async (booking, car, customer) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const receiptFileName = `receipt-${booking._id}-${Date.now()}.pdf`;
+    const receiptPath = path.join(__dirname, 'uploads', 'receipts', receiptFileName);
+    
+    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const stream = fs.createWriteStream(receiptPath);
+    doc.pipe(stream);
+
+    // Company Header
+    doc.fontSize(24).font('Helvetica-Bold').text('ZION CAR RENTALS', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(12).font('Helvetica').text('Premium Car Rental Service', { align: 'center' });
+    doc.fontSize(10).text('8,5,199 Mallika arjuna colony old bowenpally, Hyderabad - 500011', { align: 'center' });
+    doc.fontSize(10).text('Phone: 9100664083 | Email: Zioncarrentals90@gmail.com', { align: 'center' });
+    doc.moveDown(1);
+    
+    // Receipt Title
+    doc.fontSize(18).font('Helvetica-Bold').text('ADVANCE PAYMENT RECEIPT', { align: 'center' });
+    doc.moveDown(1);
+
+    // Receipt Number and Date
+    doc.fontSize(10).font('Helvetica');
+    doc.text(`Receipt No: ${booking._id.toString().slice(-8).toUpperCase()}`, { align: 'left' });
+    doc.text(`Date: ${new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', { 
+      day: '2-digit', 
+      month: 'long', 
+      year: 'numeric' 
+    })}`, { align: 'right' });
+    doc.moveDown(1);
+
+    // Customer Details
+    doc.fontSize(12).font('Helvetica-Bold').text('Customer Details:', { underline: true });
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    doc.text(`Name: ${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`);
+    doc.text(`Email: ${booking.email}`);
+    doc.text(`Mobile: ${booking.mobile}`);
+    doc.text(`Address: ${booking.residentialAddress}`);
+    doc.moveDown(1);
+
+    // Booking Details
+    doc.fontSize(12).font('Helvetica-Bold').text('Booking Details:', { underline: true });
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`);
+    doc.text(`Start Date & Time: ${new Date(booking.startTime).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })}`);
+    doc.text(`Duration: ${booking.duration} hours`);
+    doc.text(`End Date & Time: ${new Date(booking.endTime).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })}`);
+    if (booking.withDriver) {
+      doc.text(`Driver: Included`);
+    }
+    doc.moveDown(1);
+
+    // Payment Details
+    doc.fontSize(12).font('Helvetica-Bold').text('Payment Summary:', { underline: true });
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica');
+    
+    const totalPrice = booking.totalPrice || 0;
+    const advanceAmount = booking.advanceAmount || 0;
+    const remainingAmount = totalPrice - advanceAmount;
+
+    doc.text(`Total Rental Amount: ₹${totalPrice.toLocaleString('en-IN')}`, { continued: false });
+    doc.moveDown(0.3);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#FF6B00');
+    doc.text(`Advance Amount Paid: ₹${advanceAmount.toLocaleString('en-IN')}`, { continued: false });
+    doc.moveDown(0.5);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
+    doc.text(`Remaining Amount to be Paid: ₹${remainingAmount.toLocaleString('en-IN')}`, { continued: false });
+    doc.moveDown(1);
+
+    // Important Note
+    doc.fontSize(10).font('Helvetica-Oblique').fillColor('#666666');
+    doc.text('Note: The remaining amount must be paid at the time of vehicle pickup.', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.text('Please bring your Aadhaar card and valid driving license for verification.', { align: 'center' });
+    doc.moveDown(1);
+
+    // Footer
+    doc.fontSize(9).font('Helvetica').fillColor('#000000');
+    doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.text('Thank you for choosing Zion Car Rentals!', { align: 'center' });
+
+    doc.end();
+
+    return new Promise((resolve, reject) => {
+      stream.on('finish', () => {
+        const receiptUrl = `/uploads/receipts/${receiptFileName}`;
+        resolve(receiptUrl);
+      });
+      stream.on('error', (error) => {
+        console.error('PDF generation error:', error);
+        reject(error);
+      });
+    });
+  } catch (error) {
+    console.error('Error generating receipt PDF:', error);
+    throw error;
+  }
+};
+
+// Check if a time range overlaps with existing bookings
+const checkTimeOverlap = (requestedStart, requestedEnd, existingStart, existingEnd) => {
+  return requestedStart < existingEnd && requestedEnd > existingStart;
+};
+
+// Get next available time and max duration for a car
+const getAvailabilityInfo = async (carId, requestedStart, requestedDuration) => {
+  const requestedEnd = new Date(requestedStart.getTime() + (requestedDuration * 60 * 60 * 1000));
+  
+  // Get all bookings that block availability (advance_paid, verified, active)
+  const blockingStatuses = ['advance_paid', 'verified', 'active'];
+  const existingBookings = await Booking.find({
+    carId,
+    status: { $in: blockingStatuses }
+  }).sort({ startTime: 1 });
+
+  // Check for overlaps
+  for (const booking of existingBookings) {
+    if (checkTimeOverlap(requestedStart, requestedEnd, booking.startTime, booking.endTime)) {
+      // Find next available time (after this booking ends)
+      const nextAvailableStart = booking.endTime;
+      
+      // Find max duration until next booking
+      let maxDurationHours = null;
+      const nextBooking = existingBookings.find(b => 
+        b.startTime > nextAvailableStart && 
+        checkTimeOverlap(nextAvailableStart, new Date(nextAvailableStart.getTime() + (72 * 60 * 60 * 1000)), b.startTime, b.endTime)
+      );
+      
+      if (nextBooking) {
+        const maxDurationMs = nextBooking.startTime - nextAvailableStart;
+        maxDurationHours = Math.floor(maxDurationMs / (60 * 60 * 1000));
+        // Round down to nearest 12 hours (since durations are in multiples of 12)
+        maxDurationHours = Math.floor(maxDurationHours / 12) * 12;
+        // Ensure minimum of 12 hours
+        if (maxDurationHours < 12) {
+          maxDurationHours = 0; // No duration available
+        }
+      } else {
+        // No next booking, can book up to 72 hours
+        maxDurationHours = 72;
+      }
+      
+      return {
+        available: false,
+        nextAvailableStartTime: nextAvailableStart.toISOString(),
+        maxDurationHours: maxDurationHours
+      };
+    }
+  }
+  
+  return { available: true };
+};
+
 // ==================== AUTH ROUTES ====================
 
 app.post('/api/auth/register', async (req, res) => {
@@ -333,9 +603,109 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// ==================== FORGOT PASSWORD ROUTES ====================
+
+// Request password reset
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      // Don't reveal if user exists or not for security
+      return res.json({ 
+        message: 'If an account with that email exists, a password reset link has been sent.' 
+      });
+    }
+
+    // Generate reset token
+    const resetToken = require('crypto').randomBytes(32).toString('hex');
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour from now
+
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = new Date(resetTokenExpiry);
+    await user.save();
+
+    // In production, send email with reset link
+    // For now, return the token (remove this in production)
+    const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/reset-password?token=${resetToken}`;
+    
+    console.log('Password reset link:', resetLink); // Remove in production
+    
+    res.json({ 
+      message: 'If an account with that email exists, a password reset link has been sent.',
+      resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined, // Only in dev
+      resetLink: process.env.NODE_ENV === 'development' ? resetLink : undefined // Only in dev
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Verify reset token
+app.get('/api/auth/verify-reset-token/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    res.json({ message: 'Token is valid', email: user.email });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reset password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ error: 'Token and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    res.json({ message: 'Password has been reset successfully' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== CAR ROUTES ====================
 
-app.get('/api/cars', async (req, res) => {
+app.get('/api/cars', checkMongoConnection, async (req, res) => {
   try {
     const { type, available, fuelType, gearType } = req.query;
     let filter = {};
@@ -348,11 +718,12 @@ app.get('/api/cars', async (req, res) => {
     const cars = await Car.find(filter).sort({ createdAt: -1 });
     res.json({ cars });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching cars:', error);
+    res.status(500).json({ error: error.message, cars: [] });
   }
 });
 
-app.get('/api/cars/:id', async (req, res) => {
+app.get('/api/cars/:id', checkMongoConnection, async (req, res) => {
   try {
     const car = await Car.findById(req.params.id);
     if (!car) {
@@ -364,12 +735,37 @@ app.get('/api/cars/:id', async (req, res) => {
   }
 });
 
+// Check car availability for a specific time range
+app.post('/api/cars/:id/check-availability', checkMongoConnection, async (req, res) => {
+  try {
+    const { startTime, duration } = req.body;
+    const carId = req.params.id;
+
+    if (!startTime || !duration) {
+      return res.status(400).json({ error: 'Start time and duration are required' });
+    }
+
+    const car = await Car.findById(carId);
+    if (!car) {
+      return res.status(404).json({ error: 'Car not found' });
+    }
+
+    const requestedStart = new Date(startTime);
+    const availabilityInfo = await getAvailabilityInfo(carId, requestedStart, parseInt(duration));
+
+    res.json(availabilityInfo);
+  } catch (error) {
+    console.error('Availability check error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
   try {
     const { 
       carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
-      pricing, securityDeposit, driverAvailable, driverChargesPerDay,
-      description, features, imageUrl, registrationNumber
+      pricing, securityDeposit, advanceAmount, driverAvailable, driverChargesPerDay,
+      description, features, imageUrl, images, registrationNumber
     } = req.body;
 
     if (!pricing || !pricing.price12hr || !pricing.price24hr || !pricing.price36hr || 
@@ -377,10 +773,25 @@ app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
       return res.status(400).json({ error: 'All pricing tiers (12hr, 24hr, 36hr, 48hr, 60hr, 72hr) are required' });
     }
 
+    if (!advanceAmount || advanceAmount <= 0) {
+      return res.status(400).json({ error: 'Advance amount is required and must be greater than 0' });
+    }
+
+    // Handle images: if images array is provided, use it; otherwise fall back to imageUrl
+    let carImages = [];
+    if (images && Array.isArray(images) && images.length > 0) {
+      carImages = images;
+    } else if (imageUrl) {
+      // For backward compatibility, if imageUrl is provided, add it to images array
+      carImages = [imageUrl];
+    }
+
     const car = new Car({ 
       carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
-      pricing, securityDeposit, driverAvailable, driverChargesPerDay,
-      description, features, imageUrl, registrationNumber
+      pricing, securityDeposit, advanceAmount, driverAvailable, driverChargesPerDay,
+      description, features, imageUrl: imageUrl || (carImages.length > 0 ? carImages[0] : ''), // Keep for backward compatibility
+      images: carImages,
+      registrationNumber
     });
     
     await car.save();
@@ -392,7 +803,32 @@ app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
 
 app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
-    const car = await Car.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    const updateData = { ...req.body };
+    
+    // Handle images: if images array is provided, use it
+    if (updateData.images && Array.isArray(updateData.images)) {
+      // If images array is provided, update it
+      // Also update imageUrl to first image for backward compatibility
+      if (updateData.images.length > 0) {
+        updateData.imageUrl = updateData.images[0];
+      }
+    } else if (updateData.imageUrl && !updateData.images) {
+      // If only imageUrl is provided, add it to images array
+      const existingCar = await Car.findById(req.params.id);
+      if (existingCar) {
+        updateData.images = existingCar.images && existingCar.images.length > 0 
+          ? existingCar.images 
+          : [updateData.imageUrl];
+        // Update first image in array if it exists
+        if (updateData.images.length > 0) {
+          updateData.images[0] = updateData.imageUrl;
+        }
+      } else {
+        updateData.images = [updateData.imageUrl];
+      }
+    }
+    
+    const car = await Car.findByIdAndUpdate(req.params.id, updateData, { new: true, runValidators: true });
     if (!car) {
       return res.status(404).json({ error: 'Car not found' });
     }
@@ -416,22 +852,28 @@ app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
 
 // ==================== BOOKING ROUTES ====================
 
+// Create booking after advance payment (this is called after payment succeeds)
 app.post('/api/bookings', 
   authenticate,
-  upload.fields([
-    { name: 'drivingLicense', maxCount: 1 },
-    { name: 'aadharCard', maxCount: 1 },
-    { name: 'livePhoto', maxCount: 1 }
-  ]),
+  checkMongoConnection,
   async (req, res) => {
     try {
+      if (!req.body || !req.body.carId) {
+        return res.status(400).json({ error: 'Missing required booking data. Please ensure all fields are filled.' });
+      }
+
       const {
         carId, startTime, duration, fullName, guardianName, guardianRelation,
         residentialAddress, email, mobile, occupation,
-        reference1Name, reference1Mobile, reference2Name, reference2Mobile,
         drivingLicenseNumber, licenseExpiryDate,
-        depositType, bikeDetails, withDriver, homeDelivery, deliveryAddress, deliveryDistance
+        depositType, bikeDetails, withDriver, homeDelivery, deliveryAddress, deliveryDistance,
+        paymentId, paymentStatus
       } = req.body;
+
+      // Payment must be completed before creating booking
+      if (paymentStatus !== 'completed' || !paymentId) {
+        return res.status(400).json({ error: 'Advance payment must be completed before creating booking' });
+      }
 
       if (duration % 12 !== 0) {
         return res.status(400).json({ error: 'Duration must be in multiples of 12 hours' });
@@ -445,22 +887,31 @@ app.post('/api/bookings',
         return res.status(400).json({ error: 'Car is not available' });
       }
 
-      if (withDriver === 'true' && !car.driverAvailable) {
-        return res.status(400).json({ error: 'Driver service not available for this car' });
-      }
+      // Handle boolean values
+      const withDriverBool = withDriver === 'true' || withDriver === true;
+      const homeDeliveryBool = homeDelivery === 'true' || homeDelivery === true;
 
-      if (!req.files.drivingLicense || !req.files.aadharCard || !req.files.livePhoto) {
-        return res.status(400).json({ error: 'All documents (Driving License, Aadhar, Live Photo) are required' });
+      if (withDriverBool && !car.driverAvailable) {
+        return res.status(400).json({ error: 'Driver service not available for this car' });
       }
 
       const start = new Date(startTime);
       const end = new Date(start.getTime() + (duration * 60 * 60 * 1000));
+      
+      // Check availability again before creating booking (double-check)
+      const availabilityCheck = await getAvailabilityInfo(carId, start, parseInt(duration));
+      if (!availabilityCheck.available) {
+        return res.status(400).json({ 
+          error: 'Car is no longer available for the selected time',
+          nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
+          maxDurationHours: availabilityCheck.maxDurationHours
+        });
+      }
+
       const depositAmount = car.securityDeposit;
-      
-      const deliveryFee = (homeDelivery === 'true' && deliveryDistance <= 5) ? 500 : 0;
-      const totalPrice = calculateTotalPrice(car, parseInt(duration), withDriver === 'true', homeDelivery === 'true', parseFloat(deliveryDistance || 0));
-      
-      const { basePrice, driverCharges } = calculatePriceByDuration(car, parseInt(duration), withDriver === 'true');
+      const deliveryFee = (homeDeliveryBool && parseFloat(deliveryDistance || 0) <= 5) ? 500 : 0;
+      const totalPrice = calculateTotalPrice(car, parseInt(duration), withDriverBool, homeDeliveryBool, parseFloat(deliveryDistance || 0));
+      const { basePrice, driverCharges } = calculatePriceByDuration(car, parseInt(duration), withDriverBool);
 
       const booking = new Booking({
         customerId: req.userId,
@@ -469,42 +920,223 @@ app.post('/api/bookings',
         duration: parseInt(duration),
         endTime: end,
         fullName, guardianName, guardianRelation, residentialAddress, email, mobile, occupation,
-        reference1Name, reference1Mobile, reference2Name, reference2Mobile,
+        reference1Name: null,
+        reference1Mobile: null,
+        reference2Name: null,
+        reference2Mobile: null,
         drivingLicenseNumber,
         licenseExpiryDate: new Date(licenseExpiryDate),
-        drivingLicenseImage: req.files.drivingLicense[0].path,
-        aadharCardImage: req.files.aadharCard[0].path,
-        livePhoto: req.files.livePhoto[0].path,
+        drivingLicenseImage: null,
+        aadharCardImage: null,
+        livePhoto: null,
         depositType,
         bikeDetails: depositType === 'bike' ? bikeDetails : null,
         depositAmount,
-        withDriver: withDriver === 'true',
+        withDriver: withDriverBool,
         driverCharges,
-        homeDelivery: homeDelivery === 'true',
-        deliveryAddress: homeDelivery === 'true' ? deliveryAddress : null,
-        deliveryDistance: homeDelivery === 'true' ? parseFloat(deliveryDistance) : 0,
+        homeDelivery: homeDeliveryBool,
+        deliveryAddress: homeDeliveryBool ? deliveryAddress : null,
+        deliveryDistance: homeDeliveryBool ? parseFloat(deliveryDistance || 0) : 0,
         deliveryFee,
         basePrice,
         totalPrice,
-        status: 'pending'
+        status: 'advance_paid',
+        advanceAmount: car.advanceAmount,
+        advancePaymentStatus: 'completed',
+        advancePaymentDate: new Date()
       });
 
       await booking.save();
 
+      // Generate PDF receipt
+      try {
+        const customer = await User.findById(req.userId);
+        const receiptUrl = await generateReceiptPDF(booking, car, customer);
+        booking.receiptPdfUrl = receiptUrl;
+        await booking.save();
+      } catch (pdfError) {
+        console.error('Error generating receipt PDF:', pdfError);
+        // Don't fail the booking creation if PDF generation fails
+      }
+
       await createNotification(
         req.userId,
-        `New booking request submitted for ${car.carName}`,
+        `Advance payment received! Booking confirmed for ${car.carName}. Please arrive on time with required documents.`,
         booking._id,
         'booking_update'
       );
 
       res.status(201).json({
-        message: 'Booking submitted successfully. Waiting for admin approval.',
+        message: 'Booking created successfully. Car is now blocked for your selected time.',
         booking
       });
     } catch (error) {
       console.error('Booking error:', error);
       res.status(500).json({ error: error.message });
+    }
+});
+
+// Create Razorpay order for advance payment
+app.post('/api/bookings/advance-payment/create-order', 
+  authenticate,
+  checkMongoConnection,
+  async (req, res) => {
+    try {
+      // Check if Razorpay is initialized
+      if (!razorpay) {
+        return res.status(503).json({ 
+          error: 'Payment gateway not configured',
+          message: 'Razorpay keys are not set in the server configuration. Please contact administrator.'
+        });
+      }
+
+      const { carId, startTime, duration, amount } = req.body;
+
+      if (!carId || !startTime || !duration || !amount) {
+        return res.status(400).json({ error: 'Missing required payment information' });
+      }
+
+      const car = await Car.findById(carId);
+      if (!car) {
+        return res.status(404).json({ error: 'Car not found' });
+      }
+
+      if (amount !== car.advanceAmount) {
+        return res.status(400).json({ error: 'Advance amount mismatch' });
+      }
+
+      // Check availability before creating order
+      const requestedStart = new Date(startTime);
+      const availabilityCheck = await getAvailabilityInfo(carId, requestedStart, parseInt(duration));
+      if (!availabilityCheck.available) {
+        return res.status(400).json({ 
+          error: 'Car is no longer available for the selected time',
+          nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
+          maxDurationHours: availabilityCheck.maxDurationHours
+        });
+      }
+
+      // Create Razorpay order
+      // Receipt must be max 40 characters - use short format
+      const timestamp = Date.now().toString().slice(-8); // Last 8 digits of timestamp
+      const carIdShort = carId.toString().slice(-6); // Last 6 chars of carId
+      const receipt = `adv_${carIdShort}_${timestamp}`; // Max 20 chars: "adv_" + 6 + "_" + 8
+      
+      const options = {
+        amount: amount * 100, // Razorpay expects amount in paise (smallest currency unit)
+        currency: 'INR',
+        receipt: receipt, // Max 40 characters required
+        notes: {
+          carId: carId,
+          startTime: startTime,
+          duration: duration.toString(),
+          type: 'advance_payment'
+        }
+      };
+
+      const order = await razorpay.orders.create(options);
+
+      res.json({
+        success: true,
+        orderId: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        keyId: RAZORPAY_KEY_ID
+      });
+    } catch (error) {
+      console.error('Razorpay order creation error:', error);
+      
+      // Provide more helpful error messages
+      if (error.statusCode === 401) {
+        return res.status(401).json({ 
+          error: 'Razorpay authentication failed',
+          message: 'Invalid Razorpay API keys. Please check your RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env file.',
+          details: 'Make sure you are using the correct keys from your Razorpay dashboard (Test Mode or Live Mode)'
+        });
+      }
+      
+      // Handle receipt length error specifically
+      if (error.statusCode === 400 && error.error?.description?.includes('receipt')) {
+        return res.status(400).json({ 
+          error: 'Invalid receipt format',
+          message: 'Receipt ID is too long. Please try again.',
+          details: error.error.description
+        });
+      }
+      
+      res.status(500).json({ 
+        error: error.message || 'Failed to create payment order',
+        details: error.error?.description || 'Unknown error occurred'
+      });
+    }
+});
+
+// Verify Razorpay payment and process advance payment
+app.post('/api/bookings/advance-payment/verify', 
+  authenticate,
+  checkMongoConnection,
+  async (req, res) => {
+    try {
+      const { razorpay_order_id, razorpay_payment_id, razorpay_signature, carId, startTime, duration, amount } = req.body;
+
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return res.status(400).json({ error: 'Missing payment verification details' });
+      }
+
+      if (!carId || !startTime || !duration || !amount) {
+        return res.status(400).json({ error: 'Missing booking information' });
+      }
+
+      const car = await Car.findById(carId);
+      if (!car) {
+        return res.status(404).json({ error: 'Car not found' });
+      }
+
+      if (amount !== car.advanceAmount) {
+        return res.status(400).json({ error: 'Advance amount mismatch' });
+      }
+
+      // Check if Razorpay is initialized
+      if (!RAZORPAY_KEY_SECRET) {
+        return res.status(503).json({ 
+          error: 'Payment gateway not configured',
+          message: 'Razorpay keys are not set in the server configuration.'
+        });
+      }
+
+      // Verify payment signature
+      const crypto = require('crypto');
+      const generated_signature = crypto
+        .createHmac('sha256', RAZORPAY_KEY_SECRET)
+        .update(razorpay_order_id + '|' + razorpay_payment_id)
+        .digest('hex');
+
+      if (generated_signature !== razorpay_signature) {
+        return res.status(400).json({ error: 'Payment verification failed' });
+      }
+
+      // Check availability again before confirming
+      const requestedStart = new Date(startTime);
+      const availabilityCheck = await getAvailabilityInfo(carId, requestedStart, parseInt(duration));
+      if (!availabilityCheck.available) {
+        return res.status(400).json({ 
+          error: 'Car is no longer available for the selected time',
+          nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
+          maxDurationHours: availabilityCheck.maxDurationHours
+        });
+      }
+
+      // Payment verified successfully
+      res.json({
+        success: true,
+        paymentId: razorpay_payment_id,
+        orderId: razorpay_order_id,
+        paymentStatus: 'completed',
+        message: 'Advance payment verified successfully'
+      });
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      res.status(500).json({ error: error.message || 'Failed to verify payment' });
     }
 });
 
@@ -555,52 +1187,109 @@ app.get('/api/bookings/:id', authenticate, async (req, res) => {
   }
 });
 
-app.put('/api/bookings/:id/review', authenticate, isAdmin, async (req, res) => {
+// Download or regenerate PDF receipt
+app.get('/api/bookings/:id/receipt', authenticate, async (req, res) => {
   try {
-    const { action, adminNotes } = req.body;
+    const booking = await Booking.findById(req.params.id)
+      .populate('customerId', 'name email mobile')
+      .populate('carId');
+
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    // Check access permissions
+    if (req.user.role !== 'admin' && booking.customerId._id.toString() !== req.userId.toString()) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Check if advance payment is completed
+    if (booking.advancePaymentStatus !== 'completed') {
+      return res.status(400).json({ error: 'Receipt can only be generated after advance payment is completed' });
+    }
+
+    let receiptPath = booking.receiptPdfUrl;
+
+    // Regenerate PDF if it doesn't exist or if regenerate query param is true
+    if (!receiptPath || req.query.regenerate === 'true') {
+      const customer = await User.findById(booking.customerId._id);
+      receiptPath = await generateReceiptPDF(booking, booking.carId, customer);
+      booking.receiptPdfUrl = receiptPath;
+      await booking.save();
+    }
+
+    // Send the PDF file
+    const filePath = path.join(__dirname, receiptPath);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Receipt file not found' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="receipt-${booking._id}.pdf"`);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error serving receipt PDF:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate receipt' });
+  }
+});
+
+// Admin verification when customer arrives for pickup
+app.put('/api/bookings/:id/verify', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { action, rejectionReason, adminNotes } = req.body;
 
     const booking = await Booking.findById(req.params.id).populate('carId');
     if (!booking) {
       return res.status(404).json({ error: 'Booking not found' });
     }
 
-    if (booking.status !== 'pending') {
-      return res.status(400).json({ error: 'Booking has already been reviewed' });
+    // Only verify bookings that have advance_paid status
+    if (booking.status !== 'advance_paid') {
+      return res.status(400).json({ 
+        error: `Booking cannot be verified. Current status: ${booking.status}. Only bookings with advance_paid status can be verified.` 
+      });
     }
 
     if (action === 'accept') {
-      booking.status = 'payment_pending';
+      // Accept: Documents verified, car handed over
+      booking.status = 'verified';
+      booking.verificationDate = new Date();
       booking.adminNotes = adminNotes;
 
       await createNotification(
         booking.customerId,
-        `Your booking for ${booking.carId.carName} has been accepted! Please proceed with payment.`,
+        `Your documents have been verified! ${booking.carId.carName} is now active. Enjoy your ride!`,
         booking._id,
         'booking_update'
       );
-
-      await booking.save();
-      res.json({ message: 'Booking accepted. Customer can now proceed with payment.', booking });
-
-    } else if (action === 'decline') {
-      booking.status = 'declined';
+    } else if (action === 'reject') {
+      // Reject: Documents missing/expired, release slot, advance NOT refunded
+      booking.status = 'rejected';
+      booking.rejectionReason = rejectionReason || 'Documents missing or expired during verification';
+      booking.verificationDate = new Date();
       booking.adminNotes = adminNotes;
 
-      await Car.findByIdAndUpdate(booking.carId, { available: true });
+      // Release the time slot (rejected bookings don't block availability)
+      // The slot is automatically released since rejected status doesn't block
 
       await createNotification(
         booking.customerId,
-        `Your booking for ${booking.carId.carName} has been declined. Reason: ${adminNotes}`,
+        `Your booking for ${booking.carId.carName} has been rejected. Reason: ${booking.rejectionReason}. Note: Advance payment is non-refundable.`,
         booking._id,
         'booking_update'
       );
-
-      await booking.save();
-      res.json({ message: 'Booking declined', booking });
     } else {
-      return res.status(400).json({ error: 'Invalid action. Use "accept" or "decline"' });
+      return res.status(400).json({ error: 'Invalid action. Use "accept" or "reject"' });
     }
+
+    await booking.save();
+    res.json({ 
+      message: `Booking ${action}ed successfully`, 
+      booking,
+      note: action === 'reject' ? 'Time slot has been released. Advance payment is non-refundable.' : 'Car is now active.'
+    });
   } catch (error) {
+    console.error('Verification error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -614,8 +1303,9 @@ app.put('/api/bookings/:id/start', authenticate, isAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Booking not found' });
     }
 
-    if (booking.status !== 'paid') {
-      return res.status(400).json({ error: 'Payment must be completed first' });
+    // Can start from verified status (after admin verification)
+    if (booking.status !== 'verified') {
+      return res.status(400).json({ error: 'Booking must be verified first before starting' });
     }
 
     booking.status = 'active';
@@ -681,300 +1371,6 @@ app.put('/api/bookings/:id/complete', authenticate, isAdmin, async (req, res) =>
   }
 });
 
-// ==================== PHONEPE PAYMENT ROUTES ====================
-
-// Create Payment Order with PhonePe
-app.post('/api/payment/create-order', authenticate, async (req, res) => {
-  try {
-    const { bookingId } = req.body;
-
-    const booking = await Booking.findById(bookingId).populate('carId');
-    if (!booking) {
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-
-    if (booking.customerId.toString() !== req.userId.toString()) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    if (booking.status !== 'payment_pending') {
-      return res.status(400).json({ error: 'Booking must be accepted by admin before payment' });
-    }
-
-    // Generate unique merchant order ID
-    const merchantOrderId = randomUUID();
-    
-    // Amount in paisa (PhonePe requires amount in smallest currency unit)
-    const amountInPaisa = booking.totalPrice * 100;
-
-    // Redirect URL - where user returns after payment
-    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/callback`;
-
-    // Create meta info for tracking
-    const metaInfo = MetaInfo.builder()
-      .udf1(bookingId.toString())
-      .udf2(booking.carId.carName)
-      .udf3(req.userId.toString())
-      .udf4(`Duration: ${booking.duration}hrs`)
-      .udf5(`Deposit: ₹${booking.depositAmount}`)
-      .build();
-
-    // Build payment request
-    const paymentRequest = StandardCheckoutPayRequest.builder()
-      .merchantOrderId(merchantOrderId)
-      .amount(amountInPaisa)
-      .redirectUrl(redirectUrl)
-      .metaInfo(metaInfo)
-      .build();
-
-    // Initiate payment with PhonePe
-    const paymentResponse = await phonePeClient.pay(paymentRequest);
-
-    // Save PhonePe details to booking
-    booking.merchantOrderId = merchantOrderId;
-    booking.phonePeOrderId = paymentResponse.orderId;
-    booking.updatedAt = Date.now();
-    await booking.save();
-
-    res.json({
-      success: true,
-      redirectUrl: paymentResponse.redirectUrl,
-      orderId: paymentResponse.orderId,
-      merchantOrderId: merchantOrderId,
-      state: paymentResponse.state,
-      expireAt: paymentResponse.expireAt,
-      bookingDetails: {
-        amount: booking.totalPrice,
-        carName: booking.carId.carName,
-        duration: booking.duration,
-        depositAmount: booking.depositAmount
-      }
-    });
-
-  } catch (error) {
-    console.error('PhonePe order creation error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Check Payment Status
-app.get('/api/payment/status/:merchantOrderId', authenticate, async (req, res) => {
-  try {
-    const { merchantOrderId } = req.params;
-
-    const booking = await Booking.findOne({ merchantOrderId }).populate('carId');
-    if (!booking) {
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-
-    if (booking.customerId.toString() !== req.userId.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    // Get order status from PhonePe
-    const statusResponse = await phonePeClient.getOrderStatus(merchantOrderId);
-
-    // Update booking based on payment status
-    if (statusResponse.state === 'COMPLETED' && booking.status === 'payment_pending') {
-      booking.status = 'paid';
-      booking.paymentStatus = 'completed';
-      booking.phonePeOrderId = statusResponse.orderId;
-      
-      // Get transaction ID from payment details
-      if (statusResponse.paymentDetails && statusResponse.paymentDetails.length > 0) {
-        booking.phonePeTransactionId = statusResponse.paymentDetails[0].transactionId;
-      }
-      
-      booking.paymentDate = new Date();
-      booking.updatedAt = Date.now();
-
-      await booking.save();
-      await Car.findByIdAndUpdate(booking.carId, { available: false });
-
-      await createNotification(
-        booking.customerId,
-        `Payment successful! ₹${booking.totalPrice} paid for ${booking.carId.carName}. Booking confirmed!`,
-        booking._id,
-        'payment'
-      );
-    } else if (statusResponse.state === 'FAILED') {
-      booking.paymentStatus = 'failed';
-      await booking.save();
-    }
-
-    res.json({
-      success: true,
-      status: statusResponse.state,
-      orderDetails: statusResponse,
-      bookingStatus: booking.status
-    });
-
-  } catch (error) {
-    console.error('Payment status check error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PhonePe Webhook Handler
-app.post('/api/payment/webhook', express.json(), async (req, res) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    const responseBody = JSON.stringify(req.body);
-
-    // Get webhook credentials from environment
-    const webhookUsername = process.env.PHONEPE_WEBHOOK_USERNAME;
-    const webhookPassword = process.env.PHONEPE_WEBHOOK_PASSWORD;
-
-    // Validate webhook callback
-    const callbackResponse = phonePeClient.validateCallback(
-      webhookUsername,
-      webhookPassword,
-      authHeader,
-      responseBody
-    );
-
-    console.log('PhonePe Webhook Event:', callbackResponse.type);
-
-    const payload = callbackResponse.payload;
-
-    // Handle different callback types
-    switch (callbackResponse.type) {
-      case 'CHECKOUT_ORDER_COMPLETED':
-        // Payment successful
-        const booking = await Booking.findOne({ merchantOrderId: payload.originalMerchantOrderId }).populate('carId');
-        
-        if (booking) {
-          booking.status = 'paid';
-          booking.paymentStatus = 'completed';
-          booking.phonePeOrderId = payload.orderId;
-          
-          if (payload.paymentDetails && payload.paymentDetails.length > 0) {
-            booking.phonePeTransactionId = payload.paymentDetails[0].transactionId;
-          }
-          
-          booking.paymentDate = new Date();
-          booking.updatedAt = Date.now();
-          
-          await booking.save();
-          await Car.findByIdAndUpdate(booking.carId, { available: false });
-
-          await createNotification(
-            booking.customerId,
-            `Payment of ₹${booking.totalPrice} confirmed for ${booking.carId.carName}!`,
-            booking._id,
-            'payment'
-          );
-        }
-        break;
-
-      case 'CHECKOUT_ORDER_FAILED':
-        // Payment failed
-        const failedBooking = await Booking.findOne({ merchantOrderId: payload.originalMerchantOrderId }).populate('carId');
-        
-        if (failedBooking) {
-          failedBooking.paymentStatus = 'failed';
-          failedBooking.updatedAt = Date.now();
-          await failedBooking.save();
-
-          await createNotification(
-            failedBooking.customerId,
-            `Payment failed for ${failedBooking.carId.carName}. Please try again.`,
-            failedBooking._id,
-            'payment'
-          );
-        }
-        break;
-
-      case 'PG_REFUND_COMPLETED':
-        // Refund completed
-        console.log('Refund completed:', payload.merchantRefundId);
-        break;
-
-      case 'PG_REFUND_FAILED':
-        // Refund failed
-        console.log('Refund failed:', payload.merchantRefundId);
-        break;
-
-      case 'PG_REFUND_ACCEPTED':
-        // Refund accepted but not completed yet
-        console.log('Refund accepted:', payload.merchantRefundId);
-        break;
-
-      default:
-        console.log('Unhandled webhook event:', callbackResponse.type);
-    }
-
-    res.json({ status: 'ok' });
-
-  } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Initiate Refund
-app.post('/api/payment/refund', authenticate, isAdmin, async (req, res) => {
-  try {
-    const { bookingId, amount } = req.body;
-
-    const booking = await Booking.findById(bookingId);
-    if (!booking) {
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-
-    if (!booking.merchantOrderId) {
-      return res.status(400).json({ error: 'No payment found for this booking' });
-    }
-
-    // Generate unique refund ID
-    const merchantRefundId = randomUUID();
-    
-    // Amount in paisa
-    const refundAmountInPaisa = amount * 100;
-
-    // Build refund request
-    const refundRequest = RefundRequest.builder()
-      .merchantRefundId(merchantRefundId)
-      .originalMerchantOrderId(booking.merchantOrderId)
-      .amount(refundAmountInPaisa)
-      .build();
-
-    // Initiate refund with PhonePe
-    const refundResponse = await phonePeClient.refund(refundRequest);
-
-    res.json({
-      success: true,
-      message: 'Refund initiated successfully',
-      refundId: refundResponse.refundId,
-      merchantRefundId: merchantRefundId,
-      state: refundResponse.state,
-      amount: refundResponse.amount / 100
-    });
-
-  } catch (error) {
-    console.error('Refund initiation error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Check Refund Status
-app.get('/api/payment/refund/status/:merchantRefundId', authenticate, isAdmin, async (req, res) => {
-  try {
-    const { merchantRefundId } = req.params;
-
-    // Get refund status from PhonePe
-    const refundStatus = await phonePeClient.getRefundStatus(merchantRefundId);
-
-    res.json({
-      success: true,
-      refundStatus
-    });
-
-  } catch (error) {
-    console.error('Refund status check error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ==================== NOTIFICATION ROUTES ====================
 
@@ -1003,6 +1399,373 @@ app.put('/api/notifications/:id/read', authenticate, async (req, res) => {
 
     res.json({ message: 'Notification marked as read', notification });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/notifications/read-all', authenticate, async (req, res) => {
+  try {
+    await Notification.updateMany(
+      { userId: req.userId, read: false },
+      { read: true }
+    );
+    res.json({ message: 'All notifications marked as read' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/notifications/:id', authenticate, async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndDelete({
+      _id: req.params.id,
+      userId: req.userId
+    });
+
+    if (!notification) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
+
+    res.json({ message: 'Notification deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== UPDATE ROUTES ====================
+
+// Get all active updates for a user (with read status)
+app.get('/api/updates', authenticate, async (req, res) => {
+  try {
+    const now = new Date();
+    const activeUpdates = await Update.find({
+      active: true,
+      $or: [
+        { expiryDate: null },
+        { expiryDate: { $gt: now } }
+      ]
+    })
+    .populate('createdBy', 'name email')
+    .sort({ createdAt: -1 });
+
+    // Get read status for current user
+    const readUpdateIds = await UpdateRead.find({ userId: req.userId })
+      .distinct('updateId');
+
+    const updatesWithReadStatus = activeUpdates.map(update => ({
+      _id: update._id,
+      title: update.title,
+      message: update.message,
+      createdAt: update.createdAt,
+      expiryDate: update.expiryDate,
+      createdBy: update.createdBy,
+      read: readUpdateIds.includes(update._id.toString())
+    }));
+
+    res.json({ updates: updatesWithReadStatus });
+  } catch (error) {
+    console.error('Get updates error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get unread count for current user
+app.get('/api/updates/unread-count', authenticate, async (req, res) => {
+  try {
+    const now = new Date();
+    const activeUpdates = await Update.find({
+      active: true,
+      $or: [
+        { expiryDate: null },
+        { expiryDate: { $gt: now } }
+      ]
+    }).distinct('_id');
+
+    const readUpdateIds = await UpdateRead.find({ 
+      userId: req.userId,
+      updateId: { $in: activeUpdates }
+    }).distinct('updateId');
+
+    const unreadCount = activeUpdates.length - readUpdateIds.length;
+
+    res.json({ unreadCount });
+  } catch (error) {
+    console.error('Get unread count error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mark update as read
+app.put('/api/updates/:id/read', authenticate, async (req, res) => {
+  try {
+    const update = await Update.findById(req.params.id);
+    if (!update) {
+      return res.status(404).json({ error: 'Update not found' });
+    }
+
+    // Create or update read record
+    await UpdateRead.findOneAndUpdate(
+      { updateId: req.params.id, userId: req.userId },
+      { readAt: new Date() },
+      { upsert: true, new: true }
+    );
+
+    res.json({ message: 'Update marked as read' });
+  } catch (error) {
+    console.error('Mark update as read error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mark all updates as read
+app.put('/api/updates/read-all', authenticate, async (req, res) => {
+  try {
+    const now = new Date();
+    const activeUpdates = await Update.find({
+      active: true,
+      $or: [
+        { expiryDate: null },
+        { expiryDate: { $gt: now } }
+      ]
+    }).distinct('_id');
+
+    // Mark all as read
+    const readRecords = activeUpdates.map(updateId => ({
+      updateId,
+      userId: req.userId,
+      readAt: new Date()
+    }));
+
+    if (readRecords.length > 0) {
+      await UpdateRead.insertMany(readRecords, { ordered: false });
+    }
+
+    res.json({ message: 'All updates marked as read' });
+  } catch (error) {
+    console.error('Mark all updates as read error:', error);
+    // Ignore duplicate key errors (already read)
+    if (error.code !== 11000) {
+      res.status(500).json({ error: error.message });
+    } else {
+      res.json({ message: 'All updates marked as read' });
+    }
+  }
+});
+
+// Admin: Get all updates (for management)
+app.get('/api/admin/updates', authenticate, isAdmin, async (req, res) => {
+  try {
+    const updates = await Update.find()
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 });
+    
+    const updatesWithFields = updates.map(update => ({
+      _id: update._id,
+      title: update.title,
+      message: update.message,
+      active: update.active,
+      createdAt: update.createdAt,
+      expiryDate: update.expiryDate,
+      createdBy: update.createdBy,
+      updatedAt: update.updatedAt
+    }));
+    
+    res.json({ updates: updatesWithFields });
+  } catch (error) {
+    console.error('Get admin updates error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Create update
+app.post('/api/admin/updates', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { title, message, active, expiryDate } = req.body;
+
+    if (!title || !message) {
+      return res.status(400).json({ error: 'Title and message are required' });
+    }
+
+    const update = new Update({
+      title,
+      message,
+      active: active !== undefined ? active : true,
+      createdBy: req.userId,
+      expiryDate: expiryDate ? new Date(expiryDate) : null,
+      updatedAt: new Date()
+    });
+
+    await update.save();
+    await update.populate('createdBy', 'name email');
+
+    res.status(201).json({ message: 'Update created successfully', update });
+  } catch (error) {
+    console.error('Create update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Update existing update
+app.put('/api/admin/updates/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { title, message, active, expiryDate } = req.body;
+
+    const update = await Update.findById(req.params.id);
+    if (!update) {
+      return res.status(404).json({ error: 'Update not found' });
+    }
+
+    if (title) update.title = title;
+    if (message) update.message = message;
+    if (active !== undefined) update.active = active;
+    if (expiryDate !== undefined) update.expiryDate = expiryDate ? new Date(expiryDate) : null;
+    update.updatedAt = new Date();
+
+    await update.save();
+    await update.populate('createdBy', 'name email');
+
+    res.json({ message: 'Update updated successfully', update });
+  } catch (error) {
+    console.error('Update update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Delete update
+app.delete('/api/admin/updates/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const update = await Update.findByIdAndDelete(req.params.id);
+    if (!update) {
+      return res.status(404).json({ error: 'Update not found' });
+    }
+
+    // Also delete all read records for this update
+    await UpdateRead.deleteMany({ updateId: req.params.id });
+
+    res.json({ message: 'Update deleted successfully' });
+  } catch (error) {
+    console.error('Delete update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== HERO VIDEO ROUTES ====================
+
+// Get active hero video (public)
+app.get('/api/hero-video', async (req, res) => {
+  try {
+    const heroVideo = await HeroVideo.findOne({ active: true }).sort({ updatedAt: -1 });
+    if (!heroVideo) {
+      return res.json({ videoUrl: null, active: false });
+    }
+    res.json({ videoUrl: heroVideo.videoUrl, active: heroVideo.active });
+  } catch (error) {
+    console.error('Get hero video error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Get hero video settings
+app.get('/api/admin/hero-video', authenticate, isAdmin, async (req, res) => {
+  try {
+    const heroVideo = await HeroVideo.findOne().sort({ updatedAt: -1 });
+    res.json({ heroVideo: heroVideo || null });
+  } catch (error) {
+    console.error('Get admin hero video error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Update hero video
+app.put('/api/admin/hero-video', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { videoUrl, active } = req.body;
+    if (!videoUrl) {
+      return res.status(400).json({ error: 'Video URL is required' });
+    }
+
+    // If setting to active, deactivate all other videos
+    if (active !== false) {
+      await HeroVideo.updateMany({}, { active: false });
+    }
+
+    // Create or update video
+    const heroVideo = await HeroVideo.findOneAndUpdate(
+      {},
+      {
+        videoUrl,
+        active: active !== undefined ? active : true,
+        updatedBy: req.userId,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ message: 'Hero video updated successfully', heroVideo });
+  } catch (error) {
+    console.error('Update hero video error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== OFFER BANNER ROUTES ====================
+
+// Get active offer banner (public)
+app.get('/api/offer-banner', async (req, res) => {
+  try {
+    const banner = await OfferBanner.findOne({ active: true }).sort({ updatedAt: -1 });
+    if (!banner) {
+      return res.json({ banner: null });
+    }
+    res.json({ banner });
+  } catch (error) {
+    console.error('Get offer banner error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Get offer banner settings
+app.get('/api/admin/offer-banner', authenticate, isAdmin, async (req, res) => {
+  try {
+    const banner = await OfferBanner.findOne().sort({ updatedAt: -1 });
+    res.json({ banner: banner || null });
+  } catch (error) {
+    console.error('Get admin offer banner error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Update offer banner
+app.put('/api/admin/offer-banner', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { imageUrl, title, description, linkUrl, active } = req.body;
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'Image URL is required' });
+    }
+
+    // Deactivate all existing banners
+    if (active !== false) {
+      await OfferBanner.updateMany({}, { active: false });
+    }
+
+    // Create or update banner
+    const banner = await OfferBanner.findOneAndUpdate(
+      {},
+      {
+        imageUrl,
+        title: title || '',
+        description: description || '',
+        linkUrl: linkUrl || '',
+        active: active !== undefined ? active : true,
+        updatedBy: req.userId,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ message: 'Offer banner updated successfully', banner });
+  } catch (error) {
+    console.error('Update offer banner error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1039,11 +1802,33 @@ app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
   }
 });
 
+// ==================== HEALTH CHECK ====================
+
+app.get('/api/health', (req, res) => {
+  const mongoStatus = mongoose.connection.readyState;
+  const mongoStates = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting'
+  };
+  
+  res.json({
+    status: 'ok',
+    server: 'running',
+    mongodb: {
+      status: mongoStates[mongoStatus] || 'unknown',
+      connected: mongoStatus === 1
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
 // ==================== HOME ROUTE ====================
 
 app.get('/', (req, res) => {
   res.json({
-    message: '🚗 Car Rental System API with PhonePe',
+    message: '🚗 Car Rental System API',
     version: '2.0.0',
     endpoints: {
       auth: [
@@ -1066,16 +1851,11 @@ app.get('/', (req, res) => {
         'PUT /api/bookings/:id/start',
         'PUT /api/bookings/:id/complete'
       ],
-      payment: [
-        'POST /api/payment/create-order',
-        'GET /api/payment/status/:merchantOrderId',
-        'POST /api/payment/webhook',
-        'POST /api/payment/refund',
-        'GET /api/payment/refund/status/:merchantRefundId'
-      ],
       notifications: [
         'GET /api/notifications',
-        'PUT /api/notifications/:id/read'
+        'PUT /api/notifications/:id/read',
+        'PUT /api/notifications/read-all',
+        'DELETE /api/notifications/:id'
       ],
       admin: [
         'GET /api/admin/stats'
@@ -1096,8 +1876,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🚗 CAR RENTAL SYSTEM RUNNING ON PORT ${PORT}`);
   console.log(`MongoDB: ${MONGODB_URI}`);
-  console.log(`PhonePe Environment: ${process.env.NODE_ENV === 'production' ? 'PRODUCTION' : 'SANDBOX'}`);
-  console.log(`PhonePe: ${process.env.PHONEPE_CLIENT_ID ? '✅ Configured' : '❌ Not Configured'}`);
 });
 
 module.exports = app;
