@@ -1,3 +1,4 @@
+// ==================== IMPORTS & CONFIGURATION ====================
 const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/car-rental';
 
+// ==================== RAZORPAY INITIALIZATION ====================
 // Initialize Razorpay only if keys are provided
 let razorpay = null;
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
@@ -37,6 +39,7 @@ if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET &&
   console.log('   Payment gateway will not be available until keys are configured.');
 }
 
+// ==================== EXPRESS MIDDLEWARE ====================
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -46,10 +49,7 @@ if (!fs.existsSync('./uploads')) {
   fs.mkdirSync('./uploads', { recursive: true });
 }
 
-if (!fs.existsSync('./uploads/receipts')) {
-  fs.mkdirSync('./uploads/receipts', { recursive: true });
-}
-
+// ==================== MONGODB CONNECTION ====================
 // MongoDB connection with retry logic
 const connectMongoDB = async () => {
   try {
@@ -193,7 +193,7 @@ const bookingSchema = new mongoose.Schema({
   actualReturnTime: Date,
   lateHours: { type: Number, default: 0 },
 
-  receiptPdfUrl: { type: String },
+  // receiptPdfUrl removed - PDFs are generated on-demand, no file storage needed
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -246,6 +246,7 @@ const offerBannerSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// ==================== MODELS ====================
 const User = mongoose.model('User', userSchema);
 const Car = mongoose.model('Car', carSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
@@ -379,121 +380,258 @@ const createNotification = async (userId, message, bookingId = null, type = 'gen
   }
 };
 
-// Generate PDF receipt for booking
+// Generate PDF receipt for booking (returns buffer, doesn't save to file)
 const generateReceiptPDF = async (booking, car, customer) => {
-  try {
-    const PDFDocument = require('pdfkit');
-    const receiptFileName = `receipt-${booking._id}-${Date.now()}.pdf`;
-    const receiptPath = path.join(__dirname, 'uploads', 'receipts', receiptFileName);
+  return new Promise((resolve, reject) => {
+    try {
+      const PDFDocument = require('pdfkit');
+      
+      const doc = new PDFDocument({ 
+        margin: 50, 
+        size: 'A4',
+        autoFirstPage: true
+      });
+      
+      // Collect PDF data in buffer instead of writing to file
+      const chunks = [];
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => {
+        const pdfBuffer = Buffer.concat(chunks);
+        resolve(pdfBuffer);
+      });
+      doc.on('error', (error) => {
+        reject(error);
+      });
+
+    // Set initial position at document margin and disable any strokes to prevent unwanted borders
+    const topMargin = 50; // Start at document margin
+    doc.y = topMargin;
+    doc.lineWidth(0); // Disable line drawing to prevent any borders
     
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
-    const stream = fs.createWriteStream(receiptPath);
-    doc.pipe(stream);
+    // Logo (if exists) - centered at top
+    // Check possible locations for the logo
+    const possibleLogoPaths = [
+      path.join(__dirname, 'uploads', 'logo.png'),
+      path.join(__dirname, 'uploads', 'logo.jpg'),
+    ];
+    
+    let logoPath = null;
+    for (const testPath of possibleLogoPaths) {
+      if (fs.existsSync(testPath)) {
+        logoPath = testPath;
+        break;
+      }
+    }
+    
+    let logoExists = false;
+    const logoWidth = 100; // Logo width in points
+    
+    if (logoPath) {
+      try {
+        const logoX = (doc.page.width - logoWidth) / 2; // Center horizontally
+        // Place logo at top margin without any border
+        doc.image(logoPath, logoX, topMargin, { width: logoWidth });
+        logoExists = true;
+        doc.y = topMargin + logoWidth + 15; // Move down after logo with spacing
+        console.log(`✅ Logo added to PDF from: ${logoPath}`);
+      } catch (error) {
+        console.error('Error adding logo to PDF:', error);
+        console.error('Logo path attempted:', logoPath);
+        doc.y = topMargin; // Start position if logo fails
+      }
+    } else {
+      console.log('⚠️  Logo not found. Checked paths:', possibleLogoPaths);
+      doc.y = topMargin; // Start position if no logo
+    }
 
     // Company Header
-    doc.fontSize(24).font('Helvetica-Bold').text('ZION CAR RENTALS', { align: 'center' });
-    doc.moveDown(0.5);
-    doc.fontSize(12).font('Helvetica').text('Premium Car Rental Service', { align: 'center' });
-    doc.fontSize(10).text('8,5,199 Mallika arjuna colony old bowenpally, Hyderabad - 500011', { align: 'center' });
-    doc.fontSize(10).text('Phone: 9100664083 | Email: Zioncarrentals90@gmail.com', { align: 'center' });
-    doc.moveDown(1);
+    doc.fontSize(22).font('Helvetica-Bold').fillColor('#1a1a1a');
+    doc.text('Zion Car Rentals', { align: 'center' });
+    doc.moveDown(0.4);
+    doc.fontSize(11).font('Helvetica').fillColor('#666666');
+    doc.text('Premium Car Rental Service', { align: 'center' });
+    doc.moveDown(0.3);
+    doc.fontSize(9).font('Helvetica').fillColor('#333333');
+    doc.text('8,5,199 Mallika Arjuna Colony, Old Bowenpally, Hyderabad - 500011', { align: 'center' });
+    doc.moveDown(0.2);
+    doc.text('Phone: +91 9100664083 | Email: zioncarrentals90@gmail.com', { align: 'center' });
+    
+    // Separator line
+    doc.moveDown(0.8);
+    doc.strokeColor('#cccccc');
+    doc.lineWidth(0.5);
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+    doc.moveDown(0.8);
     
     // Receipt Title
-    doc.fontSize(18).font('Helvetica-Bold').text('ADVANCE PAYMENT RECEIPT', { align: 'center' });
-    doc.moveDown(1);
+    doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000');
+    doc.text('Advance Payment Receipt', { align: 'center' });
+    doc.moveDown(0.8);
 
-    // Receipt Number and Date
-    doc.fontSize(10).font('Helvetica');
-    doc.text(`Receipt No: ${booking._id.toString().slice(-8).toUpperCase()}`, { align: 'left' });
-    doc.text(`Date: ${new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', { 
+    // Receipt Number and Date Section
+    doc.fontSize(9).font('Helvetica').fillColor('#333333');
+    const receiptNo = booking._id.toString().slice(-8).toUpperCase();
+    const receiptDate = new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', { 
       day: '2-digit', 
       month: 'long', 
       year: 'numeric' 
-    })}`, { align: 'right' });
-    doc.moveDown(1);
+    });
+    
+    doc.text(`Receipt No: ${receiptNo}`, 50, doc.y);
+    const dateWidth = doc.widthOfString(`Date: ${receiptDate}`);
+    doc.text(`Date: ${receiptDate}`, doc.page.width - 50 - dateWidth, doc.y);
+    doc.moveDown(0.8);
 
-    // Customer Details
-    doc.fontSize(12).font('Helvetica-Bold').text('Customer Details:', { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica');
-    doc.text(`Name: ${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`);
-    doc.text(`Email: ${booking.email}`);
-    doc.text(`Mobile: ${booking.mobile}`);
-    doc.text(`Address: ${booking.residentialAddress}`);
-    doc.moveDown(1);
+    // Separator line
+    doc.strokeColor('#e0e0e0');
+    doc.lineWidth(0.3);
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+    doc.moveDown(0.8);
 
-    // Booking Details
-    doc.fontSize(12).font('Helvetica-Bold').text('Booking Details:', { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica');
-    doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`);
-    doc.text(`Start Date & Time: ${new Date(booking.startTime).toLocaleString('en-IN', {
+    // Customer Details Section (with 2 columns inside)
+    const sectionStartY = doc.y;
+    const leftMargin = 50;
+    const sectionWidth = doc.page.width - 100;
+    const lineHeight = 12;
+    const sectionTitleHeight = 15;
+    
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+    doc.text('Customer Details', leftMargin, sectionStartY);
+    
+    let currentY = sectionStartY + sectionTitleHeight;
+    doc.fontSize(9).font('Helvetica').fillColor('#333333');
+    const customerName = `${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`;
+    
+    // Customer details in 2 columns
+    const leftColX = leftMargin;
+    const rightColX = leftMargin + sectionWidth / 2 + 10;
+    const colWidth = sectionWidth / 2 - 10;
+    
+    doc.text(`Name: ${customerName}`, leftColX, currentY, { width: colWidth });
+    doc.text(`Email: ${booking.email}`, rightColX, currentY, { width: colWidth });
+    currentY += lineHeight + 2;
+    
+    doc.text(`Mobile: ${booking.mobile}`, leftColX, currentY, { width: colWidth });
+    doc.text(`Address: ${booking.residentialAddress}`, rightColX, currentY, { width: colWidth });
+    currentY += lineHeight + 8;
+
+    // Separator line
+    doc.strokeColor('#e0e0e0');
+    doc.lineWidth(0.3);
+    doc.moveTo(50, currentY).lineTo(doc.page.width - 50, currentY).stroke();
+    currentY += 12;
+
+    // Booking Details Section (with 2 columns inside) - Below Customer Details
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+    doc.text('Booking Details', leftMargin, currentY);
+    
+    currentY += sectionTitleHeight;
+    doc.fontSize(9).font('Helvetica').fillColor('#333333');
+    
+    // Booking details in 2 columns
+    doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`, leftColX, currentY, { width: sectionWidth });
+    currentY += lineHeight + 2;
+    
+    const startDateTime = new Date(booking.startTime).toLocaleString('en-IN', {
       day: '2-digit',
       month: 'long',
       year: 'numeric',
       hour: '2-digit',
-      minute: '2-digit'
-    })}`);
-    doc.text(`Duration: ${booking.duration} hours`);
-    doc.text(`End Date & Time: ${new Date(booking.endTime).toLocaleString('en-IN', {
+      minute: '2-digit',
+      hour12: true
+    });
+    doc.text(`Start: ${startDateTime}`, leftColX, currentY, { width: colWidth });
+    
+    const endDateTime = new Date(booking.endTime).toLocaleString('en-IN', {
       day: '2-digit',
       month: 'long',
       year: 'numeric',
       hour: '2-digit',
-      minute: '2-digit'
-    })}`);
+      minute: '2-digit',
+      hour12: true
+    });
+    doc.text(`End: ${endDateTime}`, rightColX, currentY, { width: colWidth });
+    currentY += lineHeight + 2;
+    
+    doc.text(`Duration: ${booking.duration} hrs`, leftColX, currentY, { width: colWidth });
     if (booking.withDriver) {
-      doc.text(`Driver: Included`);
+      doc.text('Driver: Included', rightColX, currentY, { width: colWidth });
     }
-    doc.moveDown(1);
+    currentY += lineHeight + 8;
+    
+    // Move document position to after both sections
+    doc.y = currentY;
 
-    // Payment Details
-    doc.fontSize(12).font('Helvetica-Bold').text('Payment Summary:', { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica');
+    // Separator line
+    doc.strokeColor('#e0e0e0');
+    doc.lineWidth(0.3);
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+    doc.moveDown(0.8);
+
+    // Payment Summary Section
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+    doc.text('Payment Summary', { underline: false });
+    doc.moveDown(0.5);
     
     const totalPrice = booking.totalPrice || 0;
     const advanceAmount = booking.advanceAmount || 0;
     const remainingAmount = totalPrice - advanceAmount;
 
-    doc.text(`Total Rental Amount: ₹${totalPrice.toLocaleString('en-IN')}`, { continued: false });
-    doc.moveDown(0.3);
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#FF6B00');
-    doc.text(`Advance Amount Paid: ₹${advanceAmount.toLocaleString('en-IN')}`, { continued: false });
+    // Payment items in a table-like format
+    doc.fontSize(9).font('Helvetica').fillColor('#333333');
+    const leftCol = 50;
+    const rightCol = doc.page.width - 200;
+    
+    // Total Rental Amount
+    doc.text('Total Rental Amount:', leftCol, doc.y);
+    doc.font('Helvetica-Bold');
+    doc.text(`₹${totalPrice.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
     doc.moveDown(0.5);
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000');
-    doc.text(`Remaining Amount to be Paid: ₹${remainingAmount.toLocaleString('en-IN')}`, { continued: false });
+    
+    // Advance Amount Paid
+    doc.font('Helvetica');
+    doc.text('Advance Amount Paid:', leftCol, doc.y);
+    doc.font('Helvetica-Bold').fillColor('#2563eb');
+    doc.text(`₹${advanceAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
+    doc.moveDown(0.5);
+    
+    // Remaining Amount
+    doc.font('Helvetica').fillColor('#333333');
+    doc.text('Remaining Amount to be Paid:', leftCol, doc.y);
+    doc.font('Helvetica-Bold').fillColor('#dc2626');
+    doc.text(`₹${remainingAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
     doc.moveDown(1);
+
+    // Separator line
+    doc.strokeColor('#cccccc');
+    doc.lineWidth(0.5);
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+    doc.moveDown(0.6);
 
     // Important Note
-    doc.fontSize(10).font('Helvetica-Oblique').fillColor('#666666');
-    doc.text('Note: The remaining amount must be paid at the time of vehicle pickup.', { align: 'center' });
-    doc.moveDown(0.5);
-    doc.text('Please bring your Aadhaar card and valid driving license for verification.', { align: 'center' });
-    doc.moveDown(1);
+    doc.fontSize(8.5).font('Helvetica-Oblique').fillColor('#666666');
+    const noteText = 'Note: The remaining amount must be paid at the time of vehicle pickup. Please bring your Aadhaar card and valid driving license for verification.';
+    doc.text(noteText, 50, doc.y, { align: 'left', width: doc.page.width - 100 });
+    doc.moveDown(0.8);
 
     // Footer
-    doc.fontSize(9).font('Helvetica').fillColor('#000000');
-    doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
+    doc.strokeColor('#e0e0e0');
+    doc.lineWidth(0.3);
+    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
     doc.moveDown(0.5);
+    
+    doc.fontSize(8).font('Helvetica').fillColor('#999999');
+    doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
+    doc.moveDown(0.3);
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#333333');
     doc.text('Thank you for choosing Zion Car Rentals!', { align: 'center' });
 
-    doc.end();
-
-    return new Promise((resolve, reject) => {
-      stream.on('finish', () => {
-        const receiptUrl = `/uploads/receipts/${receiptFileName}`;
-        resolve(receiptUrl);
-      });
-      stream.on('error', (error) => {
-        console.error('PDF generation error:', error);
-        reject(error);
-      });
-    });
-  } catch (error) {
-    console.error('Error generating receipt PDF:', error);
-    throw error;
-  }
+      doc.end();
+    } catch (error) {
+      console.error('Error generating receipt PDF:', error);
+      reject(error);
+    }
+  });
 };
 
 // Check if a time range overlaps with existing bookings
@@ -949,15 +1087,8 @@ app.post('/api/bookings',
       await booking.save();
 
       // Generate PDF receipt
-      try {
-        const customer = await User.findById(req.userId);
-        const receiptUrl = await generateReceiptPDF(booking, car, customer);
-        booking.receiptPdfUrl = receiptUrl;
-        await booking.save();
-      } catch (pdfError) {
-        console.error('Error generating receipt PDF:', pdfError);
-        // Don't fail the booking creation if PDF generation fails
-      }
+      // PDF will be generated on-demand when requested, no need to save it
+      // This saves disk space and eliminates file management issues
 
       await createNotification(
         req.userId,
@@ -1187,7 +1318,7 @@ app.get('/api/bookings/:id', authenticate, async (req, res) => {
   }
 });
 
-// Download or regenerate PDF receipt
+// Download PDF receipt
 app.get('/api/bookings/:id/receipt', authenticate, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id)
@@ -1208,25 +1339,14 @@ app.get('/api/bookings/:id/receipt', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Receipt can only be generated after advance payment is completed' });
     }
 
-    let receiptPath = booking.receiptPdfUrl;
+    // Generate PDF on-demand (no file storage needed)
+    const customer = await User.findById(booking.customerId._id);
+    const pdfBuffer = await generateReceiptPDF(booking, booking.carId, customer);
 
-    // Regenerate PDF if it doesn't exist or if regenerate query param is true
-    if (!receiptPath || req.query.regenerate === 'true') {
-      const customer = await User.findById(booking.customerId._id);
-      receiptPath = await generateReceiptPDF(booking, booking.carId, customer);
-      booking.receiptPdfUrl = receiptPath;
-      await booking.save();
-    }
-
-    // Send the PDF file
-    const filePath = path.join(__dirname, receiptPath);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Receipt file not found' });
-    }
-
+    // Send the PDF directly from memory
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="receipt-${booking._id}.pdf"`);
-    res.sendFile(filePath);
+    res.send(pdfBuffer);
   } catch (error) {
     console.error('Error serving receipt PDF:', error);
     res.status(500).json({ error: error.message || 'Failed to generate receipt' });
