@@ -87,8 +87,6 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   mobile: { type: String, required: true },
   role: { type: String, enum: ['customer', 'admin'], default: 'customer' },
-  resetPasswordToken: String,
-  resetPasswordExpires: Date,
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -739,106 +737,6 @@ app.post('/api/auth/login', async (req, res) => {
       user: { id: user._id, name: user.name, email: user.email, role: user.role }
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== FORGOT PASSWORD ROUTES ====================
-
-// Request password reset
-app.post('/api/auth/forgot-password', async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      // Don't reveal if user exists or not for security
-      return res.json({ 
-        message: 'If an account with that email exists, a password reset link has been sent.' 
-      });
-    }
-
-    // Generate reset token
-    const resetToken = require('crypto').randomBytes(32).toString('hex');
-    const resetTokenExpiry = Date.now() + 3600000; // 1 hour from now
-
-    user.resetPasswordToken = resetToken;
-    user.resetPasswordExpires = new Date(resetTokenExpiry);
-    await user.save();
-
-    // In production, send email with reset link
-    // For now, return the token (remove this in production)
-    const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/reset-password?token=${resetToken}`;
-    
-    console.log('Password reset link:', resetLink); // Remove in production
-    
-    res.json({ 
-      message: 'If an account with that email exists, a password reset link has been sent.',
-      resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined, // Only in dev
-      resetLink: process.env.NODE_ENV === 'development' ? resetLink : undefined // Only in dev
-    });
-  } catch (error) {
-    console.error('Forgot password error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Verify reset token
-app.get('/api/auth/verify-reset-token/:token', async (req, res) => {
-  try {
-    const { token } = req.params;
-
-    const user = await User.findOne({
-      resetPasswordToken: token,
-      resetPasswordExpires: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset token' });
-    }
-
-    res.json({ message: 'Token is valid', email: user.email });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Reset password
-app.post('/api/auth/reset-password', async (req, res) => {
-  try {
-    const { token, password } = req.body;
-
-    if (!token || !password) {
-      return res.status(400).json({ error: 'Token and password are required' });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
-
-    const user = await User.findOne({
-      resetPasswordToken: token,
-      resetPasswordExpires: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset token' });
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(password, 10);
-    user.password = hashedPassword;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-    await user.save();
-
-    res.json({ message: 'Password has been reset successfully' });
-  } catch (error) {
-    console.error('Reset password error:', error);
     res.status(500).json({ error: error.message });
   }
 });
