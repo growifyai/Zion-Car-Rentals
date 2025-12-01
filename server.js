@@ -413,30 +413,32 @@ const generateReceiptPDF = async (booking, car, customer) => {
     const possibleLogoPaths = [
       path.join(__dirname, 'uploads', 'logo.png'),
       path.join(__dirname, 'uploads', 'logo.jpg'),
+      path.join(__dirname, 'uploads', 'logo.jpeg'),
     ];
     
     let logoPath = null;
     for (const testPath of possibleLogoPaths) {
       if (fs.existsSync(testPath)) {
         logoPath = testPath;
+        console.log(`✅ Logo found at: ${logoPath}`);
         break;
       }
     }
     
-    let logoExists = false;
-    const logoWidth = 100; // Logo width in points
+    const logoWidth = 120; // Logo width in points
     
     if (logoPath) {
       try {
         const logoX = (doc.page.width - logoWidth) / 2; // Center horizontally
-        // Place logo at top margin without any border
+        // Place logo at top margin - maintain aspect ratio by only specifying width
         doc.image(logoPath, logoX, topMargin, { width: logoWidth });
-        logoExists = true;
-        doc.y = topMargin + logoWidth + 15; // Move down after logo with spacing
-        console.log(`✅ Logo added to PDF from: ${logoPath}`);
+        // Move down after logo with reasonable spacing (logo will typically be around 120px tall)
+        doc.y = topMargin + logoWidth + 25; // Add extra spacing for logo
+        console.log(`✅ Logo added to PDF successfully from: ${logoPath}`);
       } catch (error) {
-        console.error('Error adding logo to PDF:', error);
+        console.error('❌ Error adding logo to PDF:', error);
         console.error('Logo path attempted:', logoPath);
+        console.error('Error details:', error.message);
         doc.y = topMargin; // Start position if logo fails
       }
     } else {
