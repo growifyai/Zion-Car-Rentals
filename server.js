@@ -20,9 +20,9 @@ let razorpay = null;
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
-if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && 
-    RAZORPAY_KEY_ID !== 'your_razorpay_key_id_here' && 
-    RAZORPAY_KEY_SECRET !== 'your_razorpay_key_secret_here') {
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET &&
+  RAZORPAY_KEY_ID !== 'your_razorpay_key_id_here' &&
+  RAZORPAY_KEY_SECRET !== 'your_razorpay_key_secret_here') {
   try {
     const Razorpay = require('razorpay');
     razorpay = new Razorpay({
@@ -99,7 +99,7 @@ const carSchema = new mongoose.Schema({
   gearType: { type: String, enum: ['auto', 'manual'], required: true },
   fuelType: { type: String, enum: ['petrol', 'diesel', 'cng', 'hybrid', 'ev'], required: true },
   seatingCapacity: { type: Number, required: true },
-  
+
   pricing: {
     price12hr: { type: Number, required: true },
     price24hr: { type: Number, required: true },
@@ -108,12 +108,12 @@ const carSchema = new mongoose.Schema({
     price60hr: { type: Number, required: true },
     price72hr: { type: Number, required: true }
   },
-  
+
   securityDeposit: { type: Number, required: true },
   advanceAmount: { type: Number, required: true, default: 500 },
   driverAvailable: { type: Boolean, default: false },
   driverChargesPerDay: { type: Number, default: 0 },
-  
+
   description: String,
   features: [String],
   imageUrl: String, // Keep for backward compatibility
@@ -173,8 +173,8 @@ const bookingSchema = new mongoose.Schema({
   lateReturnFee: { type: Number, default: 0 },
   totalPrice: Number,
 
-  status: { 
-    type: String, 
+  status: {
+    type: String,
     enum: ['advance_paid', 'verified', 'rejected', 'active', 'completed'],
     default: 'advance_paid'
   },
@@ -244,6 +244,29 @@ const offerBannerSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+const carsBannerSchema = new mongoose.Schema({
+  imageUrl: { type: String, required: true },
+  title: { type: String },
+  description: { type: String },
+  active: { type: Boolean, default: true },
+  linkUrl: { type: String },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Schema for admin-created offline bookings (walk-in customers)
+const adminBookingSchema = new mongoose.Schema({
+  customerName: { type: String, required: true },
+  customerMobile: { type: String, required: true },
+  carId: { type: mongoose.Schema.Types.ObjectId, ref: 'Car', required: true },
+  startTime: { type: Date, required: true },
+  endTime: { type: Date, required: true },
+  amount: { type: Number },
+  notes: { type: String },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
 // ==================== MODELS ====================
 const User = mongoose.model('User', userSchema);
 const Car = mongoose.model('Car', carSchema);
@@ -253,6 +276,8 @@ const Update = mongoose.model('Update', updateSchema);
 const UpdateRead = mongoose.model('UpdateRead', updateReadSchema);
 const HeroVideo = mongoose.model('HeroVideo', heroVideoSchema);
 const OfferBanner = mongoose.model('OfferBanner', offerBannerSchema);
+const CarsBanner = mongoose.model('CarsBanner', carsBannerSchema);
+const AdminBooking = mongoose.model('AdminBooking', adminBookingSchema);
 
 // ==================== MULTER SETUP ====================
 
@@ -312,7 +337,7 @@ const isAdmin = (req, res, next) => {
 // Middleware to check MongoDB connection
 const checkMongoConnection = (req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
-    return res.status(503).json({ 
+    return res.status(503).json({
       error: 'Database not connected. Please check MongoDB service.',
       details: 'MongoDB connection is required for this operation. Please ensure MongoDB is running.'
     });
@@ -324,7 +349,7 @@ const checkMongoConnection = (req, res, next) => {
 
 const calculatePriceByDuration = (car, duration, withDriver) => {
   let basePrice = 0;
-  
+
   if (duration === 12) {
     basePrice = car.pricing.price12hr;
   } else if (duration === 24) {
@@ -341,24 +366,24 @@ const calculatePriceByDuration = (car, duration, withDriver) => {
     const days = Math.ceil(duration / 24);
     basePrice = car.pricing.price24hr * days;
   }
-  
+
   let driverCharges = 0;
   if (withDriver && car.driverAvailable) {
     const days = Math.ceil(duration / 24);
     driverCharges = car.driverChargesPerDay * days;
   }
-  
+
   return { basePrice, driverCharges };
 };
 
 const calculateTotalPrice = (car, duration, withDriver, homeDelivery, deliveryDistance) => {
   const { basePrice, driverCharges } = calculatePriceByDuration(car, duration, withDriver);
   let deliveryFee = 0;
-  
+
   if (homeDelivery && deliveryDistance <= 5) {
     deliveryFee = 500;
   }
-  
+
   return basePrice + driverCharges + deliveryFee;
 };
 
@@ -383,13 +408,13 @@ const generateReceiptPDF = async (booking, car, customer) => {
   return new Promise((resolve, reject) => {
     try {
       const PDFDocument = require('pdfkit');
-      
-      const doc = new PDFDocument({ 
-        margin: 50, 
+
+      const doc = new PDFDocument({
+        margin: 50,
         size: 'A4',
         autoFirstPage: true
       });
-      
+
       // Collect PDF data in buffer instead of writing to file
       const chunks = [];
       doc.on('data', (chunk) => chunks.push(chunk));
@@ -401,230 +426,230 @@ const generateReceiptPDF = async (booking, car, customer) => {
         reject(error);
       });
 
-    // Set initial position at document margin and disable any strokes to prevent unwanted borders
-    const topMargin = 50; // Start at document margin
-    doc.y = topMargin;
-    doc.lineWidth(0); // Disable line drawing to prevent any borders
-    
-    // Logo (if exists) - centered at top
-    // Check possible locations for the logo
-    const possibleLogoPaths = [
-      path.join(__dirname, 'uploads', 'logo.png'),
-      path.join(__dirname, 'uploads', 'logo.jpg'),
-      path.join(__dirname, 'uploads', 'logo.jpeg'),
-    ];
-    
-    let logoPath = null;
-    for (const testPath of possibleLogoPaths) {
-      if (fs.existsSync(testPath)) {
-        logoPath = testPath;
-        console.log(`✅ Logo found at: ${logoPath}`);
-        break;
+      // Set initial position at document margin and disable any strokes to prevent unwanted borders
+      const topMargin = 50; // Start at document margin
+      doc.y = topMargin;
+      doc.lineWidth(0); // Disable line drawing to prevent any borders
+
+      // Logo (if exists) - centered at top
+      // Check possible locations for the logo
+      const possibleLogoPaths = [
+        path.join(__dirname, 'uploads', 'logo.png'),
+        path.join(__dirname, 'uploads', 'logo.jpg'),
+        path.join(__dirname, 'uploads', 'logo.jpeg'),
+      ];
+
+      let logoPath = null;
+      for (const testPath of possibleLogoPaths) {
+        if (fs.existsSync(testPath)) {
+          logoPath = testPath;
+          console.log(`✅ Logo found at: ${logoPath}`);
+          break;
+        }
       }
-    }
-    
-    const logoWidth = 120; // Logo width in points
-    
-    if (logoPath) {
-      try {
-        const logoX = (doc.page.width - logoWidth) / 2; // Center horizontally
-        // Place logo at top margin - maintain aspect ratio by only specifying width
-        doc.image(logoPath, logoX, topMargin, { width: logoWidth });
-        // Move down after logo with reasonable spacing (logo will typically be around 120px tall)
-        doc.y = topMargin + logoWidth + 25; // Add extra spacing for logo
-        console.log(`✅ Logo added to PDF successfully from: ${logoPath}`);
-      } catch (error) {
-        console.error('❌ Error adding logo to PDF:', error);
-        console.error('Logo path attempted:', logoPath);
-        console.error('Error details:', error.message);
-        doc.y = topMargin; // Start position if logo fails
+
+      const logoWidth = 120; // Logo width in points
+
+      if (logoPath) {
+        try {
+          const logoX = (doc.page.width - logoWidth) / 2; // Center horizontally
+          // Place logo at top margin - maintain aspect ratio by only specifying width
+          doc.image(logoPath, logoX, topMargin, { width: logoWidth });
+          // Move down after logo with reasonable spacing (logo will typically be around 120px tall)
+          doc.y = topMargin + logoWidth + 25; // Add extra spacing for logo
+          console.log(`✅ Logo added to PDF successfully from: ${logoPath}`);
+        } catch (error) {
+          console.error('❌ Error adding logo to PDF:', error);
+          console.error('Logo path attempted:', logoPath);
+          console.error('Error details:', error.message);
+          doc.y = topMargin; // Start position if logo fails
+        }
+      } else {
+        console.log('⚠️  Logo not found. Checked paths:', possibleLogoPaths);
+        doc.y = topMargin; // Start position if no logo
       }
-    } else {
-      console.log('⚠️  Logo not found. Checked paths:', possibleLogoPaths);
-      doc.y = topMargin; // Start position if no logo
-    }
 
-    // Company Header
-    doc.fontSize(22).font('Helvetica-Bold').fillColor('#1a1a1a');
-    doc.text('Zion Car Rentals', { align: 'center' });
-    doc.moveDown(0.4);
-    doc.fontSize(11).font('Helvetica').fillColor('#666666');
-    doc.text('Premium Car Rental Service', { align: 'center' });
-    doc.moveDown(0.3);
-    doc.fontSize(9).font('Helvetica').fillColor('#333333');
-    doc.text('8,5,199 Mallika Arjuna Colony, Old Bowenpally, Hyderabad - 500011', { align: 'center' });
-    doc.moveDown(0.2);
-    doc.text('Phone: +91 9100664083 | Email: zioncarrentals90@gmail.com', { align: 'center' });
-    
-    // Separator line
-    doc.moveDown(0.8);
-    doc.strokeColor('#cccccc');
-    doc.lineWidth(0.5);
-    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-    doc.moveDown(0.8);
-    
-    // Receipt Title
-    doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000');
-    doc.text('Advance Payment Receipt', { align: 'center' });
-    doc.moveDown(0.8);
+      // Company Header
+      doc.fontSize(22).font('Helvetica-Bold').fillColor('#1a1a1a');
+      doc.text('Zion Car Rentals', { align: 'center' });
+      doc.moveDown(0.4);
+      doc.fontSize(11).font('Helvetica').fillColor('#666666');
+      doc.text('Premium Car Rental Service', { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      doc.text('8,5,199 Mallika Arjuna Colony, Old Bowenpally, Hyderabad - 500011', { align: 'center' });
+      doc.moveDown(0.2);
+      doc.text('Phone: +91 9100664083 | Email: zioncarrentals90@gmail.com', { align: 'center' });
 
-    // Receipt Number and Date Section
-    doc.fontSize(9).font('Helvetica').fillColor('#333333');
-    const receiptNo = booking._id.toString().slice(-8).toUpperCase();
-    const receiptDate = new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', { 
-      day: '2-digit', 
-      month: 'long', 
-      year: 'numeric' 
-    });
-    
-    doc.text(`Receipt No: ${receiptNo}`, 50, doc.y);
-    const dateWidth = doc.widthOfString(`Date: ${receiptDate}`);
-    doc.text(`Date: ${receiptDate}`, doc.page.width - 50 - dateWidth, doc.y);
-    doc.moveDown(0.8);
+      // Separator line
+      doc.moveDown(0.8);
+      doc.strokeColor('#cccccc');
+      doc.lineWidth(0.5);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(0.8);
 
-    // Separator line
-    doc.strokeColor('#e0e0e0');
-    doc.lineWidth(0.3);
-    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-    doc.moveDown(0.8);
+      // Receipt Title
+      doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Advance Payment Receipt', { align: 'center' });
+      doc.moveDown(0.8);
 
-    // Customer Details Section (with 2 columns inside)
-    const sectionStartY = doc.y;
-    const leftMargin = 50;
-    const sectionWidth = doc.page.width - 100;
-    const lineHeight = 12;
-    const sectionTitleHeight = 15;
-    
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-    doc.text('Customer Details', leftMargin, sectionStartY);
-    
-    let currentY = sectionStartY + sectionTitleHeight;
-    doc.fontSize(9).font('Helvetica').fillColor('#333333');
-    const customerName = `${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`;
-    
-    // Customer details in 2 columns
-    const leftColX = leftMargin;
-    const rightColX = leftMargin + sectionWidth / 2 + 10;
-    const colWidth = sectionWidth / 2 - 10;
-    
-    doc.text(`Name: ${customerName}`, leftColX, currentY, { width: colWidth });
-    doc.text(`Email: ${booking.email}`, rightColX, currentY, { width: colWidth });
-    currentY += lineHeight + 2;
-    
-    doc.text(`Mobile: ${booking.mobile}`, leftColX, currentY, { width: colWidth });
-    doc.text(`Address: ${booking.residentialAddress}`, rightColX, currentY, { width: colWidth });
-    currentY += lineHeight + 8;
+      // Receipt Number and Date Section
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      const receiptNo = booking._id.toString().slice(-8).toUpperCase();
+      const receiptDate = new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric'
+      });
 
-    // Separator line
-    doc.strokeColor('#e0e0e0');
-    doc.lineWidth(0.3);
-    doc.moveTo(50, currentY).lineTo(doc.page.width - 50, currentY).stroke();
-    currentY += 12;
+      doc.text(`Receipt No: ${receiptNo}`, 50, doc.y);
+      const dateWidth = doc.widthOfString(`Date: ${receiptDate}`);
+      doc.text(`Date: ${receiptDate}`, doc.page.width - 50 - dateWidth, doc.y);
+      doc.moveDown(0.8);
 
-    // Booking Details Section (with 2 columns inside) - Below Customer Details
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-    doc.text('Booking Details', leftMargin, currentY);
-    
-    currentY += sectionTitleHeight;
-    doc.fontSize(9).font('Helvetica').fillColor('#333333');
-    
-    // Booking details in 2 columns
-    doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`, leftColX, currentY, { width: sectionWidth });
-    currentY += lineHeight + 2;
-    
-    const startDateTime = new Date(booking.startTime).toLocaleString('en-IN', {
-      day: '2-digit',
-      month: 'long',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    });
-    doc.text(`Start: ${startDateTime}`, leftColX, currentY, { width: colWidth });
-    
-    const endDateTime = new Date(booking.endTime).toLocaleString('en-IN', {
-      day: '2-digit',
-      month: 'long',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    });
-    doc.text(`End: ${endDateTime}`, rightColX, currentY, { width: colWidth });
-    currentY += lineHeight + 2;
-    
-    doc.text(`Duration: ${booking.duration} hrs`, leftColX, currentY, { width: colWidth });
-    if (booking.withDriver) {
-      doc.text('Driver: Included', rightColX, currentY, { width: colWidth });
-    }
-    currentY += lineHeight + 8;
-    
-    // Move document position to after both sections
-    doc.y = currentY;
+      // Separator line
+      doc.strokeColor('#e0e0e0');
+      doc.lineWidth(0.3);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(0.8);
 
-    // Separator line
-    doc.strokeColor('#e0e0e0');
-    doc.lineWidth(0.3);
-    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-    doc.moveDown(0.8);
+      // Customer Details Section (with 2 columns inside)
+      const sectionStartY = doc.y;
+      const leftMargin = 50;
+      const sectionWidth = doc.page.width - 100;
+      const lineHeight = 12;
+      const sectionTitleHeight = 15;
 
-    // Payment Summary Section
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-    doc.text('Payment Summary', { underline: false });
-    doc.moveDown(0.5);
-    
-    const totalPrice = booking.totalPrice || 0;
-    const advanceAmount = booking.advanceAmount || 0;
-    const remainingAmount = totalPrice - advanceAmount;
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+      doc.text('Customer Details', leftMargin, sectionStartY);
 
-    // Payment items in a table-like format
-    doc.fontSize(9).font('Helvetica').fillColor('#333333');
-    const leftCol = 50;
-    const rightCol = doc.page.width - 200;
-    
-    // Total Rental Amount
-    doc.text('Total Rental Amount:', leftCol, doc.y);
-    doc.font('Helvetica-Bold');
-    doc.text(`₹${totalPrice.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-    doc.moveDown(0.5);
-    
-    // Advance Amount Paid
-    doc.font('Helvetica');
-    doc.text('Advance Amount Paid:', leftCol, doc.y);
-    doc.font('Helvetica-Bold').fillColor('#2563eb');
-    doc.text(`₹${advanceAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-    doc.moveDown(0.5);
-    
-    // Remaining Amount
-    doc.font('Helvetica').fillColor('#333333');
-    doc.text('Remaining Amount to be Paid:', leftCol, doc.y);
-    doc.font('Helvetica-Bold').fillColor('#dc2626');
-    doc.text(`₹${remainingAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-    doc.moveDown(1);
+      let currentY = sectionStartY + sectionTitleHeight;
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      const customerName = `${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`;
 
-    // Separator line
-    doc.strokeColor('#cccccc');
-    doc.lineWidth(0.5);
-    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-    doc.moveDown(0.6);
+      // Customer details in 2 columns
+      const leftColX = leftMargin;
+      const rightColX = leftMargin + sectionWidth / 2 + 10;
+      const colWidth = sectionWidth / 2 - 10;
 
-    // Important Note
-    doc.fontSize(8.5).font('Helvetica-Oblique').fillColor('#666666');
-    const noteText = 'Note: The remaining amount must be paid at the time of vehicle pickup. Please bring your Aadhaar card and valid driving license for verification.';
-    doc.text(noteText, 50, doc.y, { align: 'left', width: doc.page.width - 100 });
-    doc.moveDown(0.8);
+      doc.text(`Name: ${customerName}`, leftColX, currentY, { width: colWidth });
+      doc.text(`Email: ${booking.email}`, rightColX, currentY, { width: colWidth });
+      currentY += lineHeight + 2;
 
-    // Footer
-    doc.strokeColor('#e0e0e0');
-    doc.lineWidth(0.3);
-    doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-    doc.moveDown(0.5);
-    
-    doc.fontSize(8).font('Helvetica').fillColor('#999999');
-    doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
-    doc.moveDown(0.3);
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#333333');
-    doc.text('Thank you for choosing Zion Car Rentals!', { align: 'center' });
+      doc.text(`Mobile: ${booking.mobile}`, leftColX, currentY, { width: colWidth });
+      doc.text(`Address: ${booking.residentialAddress}`, rightColX, currentY, { width: colWidth });
+      currentY += lineHeight + 8;
+
+      // Separator line
+      doc.strokeColor('#e0e0e0');
+      doc.lineWidth(0.3);
+      doc.moveTo(50, currentY).lineTo(doc.page.width - 50, currentY).stroke();
+      currentY += 12;
+
+      // Booking Details Section (with 2 columns inside) - Below Customer Details
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+      doc.text('Booking Details', leftMargin, currentY);
+
+      currentY += sectionTitleHeight;
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+
+      // Booking details in 2 columns
+      doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`, leftColX, currentY, { width: sectionWidth });
+      currentY += lineHeight + 2;
+
+      const startDateTime = new Date(booking.startTime).toLocaleString('en-IN', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+      doc.text(`Start: ${startDateTime}`, leftColX, currentY, { width: colWidth });
+
+      const endDateTime = new Date(booking.endTime).toLocaleString('en-IN', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+      doc.text(`End: ${endDateTime}`, rightColX, currentY, { width: colWidth });
+      currentY += lineHeight + 2;
+
+      doc.text(`Duration: ${booking.duration} hrs`, leftColX, currentY, { width: colWidth });
+      if (booking.withDriver) {
+        doc.text('Driver: Included', rightColX, currentY, { width: colWidth });
+      }
+      currentY += lineHeight + 8;
+
+      // Move document position to after both sections
+      doc.y = currentY;
+
+      // Separator line
+      doc.strokeColor('#e0e0e0');
+      doc.lineWidth(0.3);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(0.8);
+
+      // Payment Summary Section
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
+      doc.text('Payment Summary', { underline: false });
+      doc.moveDown(0.5);
+
+      const totalPrice = booking.totalPrice || 0;
+      const advanceAmount = booking.advanceAmount || 0;
+      const remainingAmount = totalPrice - advanceAmount;
+
+      // Payment items in a table-like format
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      const leftCol = 50;
+      const rightCol = doc.page.width - 200;
+
+      // Total Rental Amount
+      doc.text('Total Rental Amount:', leftCol, doc.y);
+      doc.font('Helvetica-Bold');
+      doc.text(`₹${totalPrice.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
+      doc.moveDown(0.5);
+
+      // Advance Amount Paid
+      doc.font('Helvetica');
+      doc.text('Advance Amount Paid:', leftCol, doc.y);
+      doc.font('Helvetica-Bold').fillColor('#2563eb');
+      doc.text(`₹${advanceAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
+      doc.moveDown(0.5);
+
+      // Remaining Amount
+      doc.font('Helvetica').fillColor('#333333');
+      doc.text('Remaining Amount to be Paid:', leftCol, doc.y);
+      doc.font('Helvetica-Bold').fillColor('#dc2626');
+      doc.text(`₹${remainingAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
+      doc.moveDown(1);
+
+      // Separator line
+      doc.strokeColor('#cccccc');
+      doc.lineWidth(0.5);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(0.6);
+
+      // Important Note
+      doc.fontSize(8.5).font('Helvetica-Oblique').fillColor('#666666');
+      const noteText = 'Note: The remaining amount must be paid at the time of vehicle pickup. Please bring your Aadhaar card and valid driving license for verification.';
+      doc.text(noteText, 50, doc.y, { align: 'left', width: doc.page.width - 100 });
+      doc.moveDown(0.8);
+
+      // Footer
+      doc.strokeColor('#e0e0e0');
+      doc.lineWidth(0.3);
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(0.5);
+
+      doc.fontSize(8).font('Helvetica').fillColor('#999999');
+      doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333333');
+      doc.text('Thank you for choosing Zion Car Rentals!', { align: 'center' });
 
       doc.end();
     } catch (error) {
@@ -642,27 +667,36 @@ const checkTimeOverlap = (requestedStart, requestedEnd, existingStart, existingE
 // Get next available time and max duration for a car
 const getAvailabilityInfo = async (carId, requestedStart, requestedDuration) => {
   const requestedEnd = new Date(requestedStart.getTime() + (requestedDuration * 60 * 60 * 1000));
-  
-  // Get all bookings that block availability (advance_paid, verified, active)
+
+  // Get all regular bookings that block availability (advance_paid, verified, active)
   const blockingStatuses = ['advance_paid', 'verified', 'active'];
   const existingBookings = await Booking.find({
     carId,
     status: { $in: blockingStatuses }
   }).sort({ startTime: 1 });
 
+  // Also get admin bookings (offline walk-in customers) for this car
+  const adminBookings = await AdminBooking.find({ carId }).sort({ startTime: 1 });
+
+  // Combine all bookings into one array for checking
+  const allBlockingBookings = [
+    ...existingBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime, type: 'regular' })),
+    ...adminBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime, type: 'admin' }))
+  ].sort((a, b) => a.startTime - b.startTime);
+
   // Check for overlaps
-  for (const booking of existingBookings) {
+  for (const booking of allBlockingBookings) {
     if (checkTimeOverlap(requestedStart, requestedEnd, booking.startTime, booking.endTime)) {
       // Find next available time (after this booking ends)
-      const nextAvailableStart = booking.endTime;
-      
+      const nextAvailableStart = new Date(booking.endTime);
+
       // Find max duration until next booking
       let maxDurationHours = null;
-      const nextBooking = existingBookings.find(b => 
-        b.startTime > nextAvailableStart && 
+      const nextBooking = allBlockingBookings.find(b =>
+        b.startTime > nextAvailableStart &&
         checkTimeOverlap(nextAvailableStart, new Date(nextAvailableStart.getTime() + (72 * 60 * 60 * 1000)), b.startTime, b.endTime)
       );
-      
+
       if (nextBooking) {
         const maxDurationMs = nextBooking.startTime - nextAvailableStart;
         maxDurationHours = Math.floor(maxDurationMs / (60 * 60 * 1000));
@@ -676,7 +710,7 @@ const getAvailabilityInfo = async (carId, requestedStart, requestedDuration) => 
         // No next booking, can book up to 72 hours
         maxDurationHours = 72;
       }
-      
+
       return {
         available: false,
         nextAvailableStartTime: nextAvailableStart.toISOString(),
@@ -684,7 +718,7 @@ const getAvailabilityInfo = async (carId, requestedStart, requestedDuration) => 
       };
     }
   }
-  
+
   return { available: true };
 };
 
@@ -800,14 +834,14 @@ app.post('/api/cars/:id/check-availability', checkMongoConnection, async (req, r
 
 app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
   try {
-    const { 
+    const {
       carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
       pricing, securityDeposit, advanceAmount, driverAvailable, driverChargesPerDay,
       description, features, imageUrl, images, registrationNumber
     } = req.body;
 
-    if (!pricing || !pricing.price12hr || !pricing.price24hr || !pricing.price36hr || 
-        !pricing.price48hr || !pricing.price60hr || !pricing.price72hr) {
+    if (!pricing || !pricing.price12hr || !pricing.price24hr || !pricing.price36hr ||
+      !pricing.price48hr || !pricing.price60hr || !pricing.price72hr) {
       return res.status(400).json({ error: 'All pricing tiers (12hr, 24hr, 36hr, 48hr, 60hr, 72hr) are required' });
     }
 
@@ -824,14 +858,14 @@ app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
       carImages = [imageUrl];
     }
 
-    const car = new Car({ 
+    const car = new Car({
       carName, model, brand, year, type, gearType, fuelType, seatingCapacity,
       pricing, securityDeposit, advanceAmount, driverAvailable, driverChargesPerDay,
       description, features, imageUrl: imageUrl || (carImages.length > 0 ? carImages[0] : ''), // Keep for backward compatibility
       images: carImages,
       registrationNumber
     });
-    
+
     await car.save();
     res.status(201).json({ message: 'Car added successfully', car });
   } catch (error) {
@@ -842,7 +876,7 @@ app.post('/api/cars', authenticate, isAdmin, async (req, res) => {
 app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const updateData = { ...req.body };
-    
+
     // Handle images: if images array is provided, use it
     if (updateData.images && Array.isArray(updateData.images)) {
       // If images array is provided, update it
@@ -854,8 +888,8 @@ app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
       // If only imageUrl is provided, add it to images array
       const existingCar = await Car.findById(req.params.id);
       if (existingCar) {
-        updateData.images = existingCar.images && existingCar.images.length > 0 
-          ? existingCar.images 
+        updateData.images = existingCar.images && existingCar.images.length > 0
+          ? existingCar.images
           : [updateData.imageUrl];
         // Update first image in array if it exists
         if (updateData.images.length > 0) {
@@ -865,7 +899,7 @@ app.put('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
         updateData.images = [updateData.imageUrl];
       }
     }
-    
+
     const car = await Car.findByIdAndUpdate(req.params.id, updateData, { new: true, runValidators: true });
     if (!car) {
       return res.status(404).json({ error: 'Car not found' });
@@ -891,7 +925,7 @@ app.delete('/api/cars/:id', authenticate, isAdmin, async (req, res) => {
 // ==================== BOOKING ROUTES ====================
 
 // Create booking after advance payment (this is called after payment succeeds)
-app.post('/api/bookings', 
+app.post('/api/bookings',
   authenticate,
   checkMongoConnection,
   async (req, res) => {
@@ -935,11 +969,11 @@ app.post('/api/bookings',
 
       const start = new Date(startTime);
       const end = new Date(start.getTime() + (duration * 60 * 60 * 1000));
-      
+
       // Check availability again before creating booking (double-check)
       const availabilityCheck = await getAvailabilityInfo(carId, start, parseInt(duration));
       if (!availabilityCheck.available) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Car is no longer available for the selected time',
           nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
           maxDurationHours: availabilityCheck.maxDurationHours
@@ -1005,17 +1039,17 @@ app.post('/api/bookings',
       console.error('Booking error:', error);
       res.status(500).json({ error: error.message });
     }
-});
+  });
 
 // Create Razorpay order for advance payment
-app.post('/api/bookings/advance-payment/create-order', 
+app.post('/api/bookings/advance-payment/create-order',
   authenticate,
   checkMongoConnection,
   async (req, res) => {
     try {
       // Check if Razorpay is initialized
       if (!razorpay) {
-        return res.status(503).json({ 
+        return res.status(503).json({
           error: 'Payment gateway not configured',
           message: 'Razorpay keys are not set in the server configuration. Please contact administrator.'
         });
@@ -1040,7 +1074,7 @@ app.post('/api/bookings/advance-payment/create-order',
       const requestedStart = new Date(startTime);
       const availabilityCheck = await getAvailabilityInfo(carId, requestedStart, parseInt(duration));
       if (!availabilityCheck.available) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Car is no longer available for the selected time',
           nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
           maxDurationHours: availabilityCheck.maxDurationHours
@@ -1052,7 +1086,7 @@ app.post('/api/bookings/advance-payment/create-order',
       const timestamp = Date.now().toString().slice(-8); // Last 8 digits of timestamp
       const carIdShort = carId.toString().slice(-6); // Last 6 chars of carId
       const receipt = `adv_${carIdShort}_${timestamp}`; // Max 20 chars: "adv_" + 6 + "_" + 8
-      
+
       const options = {
         amount: amount * 100, // Razorpay expects amount in paise (smallest currency unit)
         currency: 'INR',
@@ -1076,34 +1110,34 @@ app.post('/api/bookings/advance-payment/create-order',
       });
     } catch (error) {
       console.error('Razorpay order creation error:', error);
-      
+
       // Provide more helpful error messages
       if (error.statusCode === 401) {
-        return res.status(401).json({ 
+        return res.status(401).json({
           error: 'Razorpay authentication failed',
           message: 'Invalid Razorpay API keys. Please check your RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env file.',
           details: 'Make sure you are using the correct keys from your Razorpay dashboard (Test Mode or Live Mode)'
         });
       }
-      
+
       // Handle receipt length error specifically
       if (error.statusCode === 400 && error.error?.description?.includes('receipt')) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Invalid receipt format',
           message: 'Receipt ID is too long. Please try again.',
           details: error.error.description
         });
       }
-      
-      res.status(500).json({ 
+
+      res.status(500).json({
         error: error.message || 'Failed to create payment order',
         details: error.error?.description || 'Unknown error occurred'
       });
     }
-});
+  });
 
 // Verify Razorpay payment and process advance payment
-app.post('/api/bookings/advance-payment/verify', 
+app.post('/api/bookings/advance-payment/verify',
   authenticate,
   checkMongoConnection,
   async (req, res) => {
@@ -1129,7 +1163,7 @@ app.post('/api/bookings/advance-payment/verify',
 
       // Check if Razorpay is initialized
       if (!RAZORPAY_KEY_SECRET) {
-        return res.status(503).json({ 
+        return res.status(503).json({
           error: 'Payment gateway not configured',
           message: 'Razorpay keys are not set in the server configuration.'
         });
@@ -1150,7 +1184,7 @@ app.post('/api/bookings/advance-payment/verify',
       const requestedStart = new Date(startTime);
       const availabilityCheck = await getAvailabilityInfo(carId, requestedStart, parseInt(duration));
       if (!availabilityCheck.available) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Car is no longer available for the selected time',
           nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
           maxDurationHours: availabilityCheck.maxDurationHours
@@ -1169,7 +1203,7 @@ app.post('/api/bookings/advance-payment/verify',
       console.error('Payment verification error:', error);
       res.status(500).json({ error: error.message || 'Failed to verify payment' });
     }
-});
+  });
 
 app.get('/api/bookings/my-bookings', authenticate, async (req, res) => {
   try {
@@ -1265,8 +1299,8 @@ app.put('/api/bookings/:id/verify', authenticate, isAdmin, async (req, res) => {
 
     // Only verify bookings that have advance_paid status
     if (booking.status !== 'advance_paid') {
-      return res.status(400).json({ 
-        error: `Booking cannot be verified. Current status: ${booking.status}. Only bookings with advance_paid status can be verified.` 
+      return res.status(400).json({
+        error: `Booking cannot be verified. Current status: ${booking.status}. Only bookings with advance_paid status can be verified.`
       });
     }
 
@@ -1303,8 +1337,8 @@ app.put('/api/bookings/:id/verify', authenticate, isAdmin, async (req, res) => {
     }
 
     await booking.save();
-    res.json({ 
-      message: `Booking ${action}ed successfully`, 
+    res.json({
+      message: `Booking ${action}ed successfully`,
       booking,
       note: action === 'reject' ? 'Time slot has been released. Advance payment is non-refundable.' : 'Car is now active.'
     });
@@ -1465,8 +1499,8 @@ app.get('/api/updates', authenticate, async (req, res) => {
         { expiryDate: { $gt: now } }
       ]
     })
-    .populate('createdBy', 'name email')
-    .sort({ createdAt: -1 });
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 });
 
     // Get read status for current user
     const readUpdateIds = await UpdateRead.find({ userId: req.userId })
@@ -1501,7 +1535,7 @@ app.get('/api/updates/unread-count', authenticate, async (req, res) => {
       ]
     }).distinct('_id');
 
-    const readUpdateIds = await UpdateRead.find({ 
+    const readUpdateIds = await UpdateRead.find({
       userId: req.userId,
       updateId: { $in: activeUpdates }
     }).distinct('updateId');
@@ -1578,7 +1612,7 @@ app.get('/api/admin/updates', authenticate, isAdmin, async (req, res) => {
     const updates = await Update.find()
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 });
-    
+
     const updatesWithFields = updates.map(update => ({
       _id: update._id,
       title: update.title,
@@ -1589,7 +1623,7 @@ app.get('/api/admin/updates', authenticate, isAdmin, async (req, res) => {
       createdBy: update.createdBy,
       updatedAt: update.updatedAt
     }));
-    
+
     res.json({ updates: updatesWithFields });
   } catch (error) {
     console.error('Get admin updates error:', error);
@@ -1790,6 +1824,164 @@ app.put('/api/admin/offer-banner', authenticate, isAdmin, async (req, res) => {
   }
 });
 
+// ==================== CARS PAGE BANNER ROUTES ====================
+
+// Get active cars banner (public)
+app.get('/api/cars-banner', async (req, res) => {
+  try {
+    const banner = await CarsBanner.findOne({ active: true }).sort({ updatedAt: -1 });
+    if (!banner) {
+      return res.json({ banner: null });
+    }
+    res.json({ banner });
+  } catch (error) {
+    console.error('Get cars banner error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Get cars banner settings
+app.get('/api/admin/cars-banner', authenticate, isAdmin, async (req, res) => {
+  try {
+    const banner = await CarsBanner.findOne().sort({ updatedAt: -1 });
+    res.json({ banner: banner || null });
+  } catch (error) {
+    console.error('Get admin cars banner error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Update cars banner
+app.put('/api/admin/cars-banner', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { imageUrl, title, description, linkUrl, active } = req.body;
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'Image URL is required' });
+    }
+
+    // Deactivate all existing banners
+    if (active !== false) {
+      await CarsBanner.updateMany({}, { active: false });
+    }
+
+    // Create or update banner
+    const banner = await CarsBanner.findOneAndUpdate(
+      {},
+      {
+        imageUrl,
+        title: title || '',
+        description: description || '',
+        linkUrl: linkUrl || '',
+        active: active !== undefined ? active : true,
+        updatedBy: req.userId,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ message: 'Cars banner updated successfully', banner });
+  } catch (error) {
+    console.error('Update cars banner error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== ADMIN BOOKING ROUTES (Offline Walk-in Customers) ====================
+
+// Create admin booking (offline walk-in customer)
+app.post('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { customerName, customerMobile, carId, startTime, endTime, amount, notes } = req.body;
+
+    // Validate required fields
+    if (!customerName || !customerMobile || !carId || !startTime || !endTime) {
+      return res.status(400).json({ error: 'Customer name, mobile, car, start time and end time are required' });
+    }
+
+    // Verify car exists
+    const car = await Car.findById(carId);
+    if (!car) {
+      return res.status(404).json({ error: 'Car not found' });
+    }
+
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+
+    if (end <= start) {
+      return res.status(400).json({ error: 'End time must be after start time' });
+    }
+
+    // Calculate duration in hours for availability check
+    const durationHours = Math.ceil((end - start) / (60 * 60 * 1000));
+
+    // Check availability before creating booking
+    const availabilityCheck = await getAvailabilityInfo(carId, start, durationHours);
+    if (!availabilityCheck.available) {
+      return res.status(400).json({
+        error: 'Car is not available for the selected time',
+        nextAvailableStartTime: availabilityCheck.nextAvailableStartTime,
+        maxDurationHours: availabilityCheck.maxDurationHours
+      });
+    }
+
+    const adminBooking = new AdminBooking({
+      customerName,
+      customerMobile,
+      carId,
+      startTime: start,
+      endTime: end,
+      amount: amount || 0,
+      notes: notes || '',
+      createdBy: req.userId
+    });
+
+    await adminBooking.save();
+
+    // Populate car details for response
+    await adminBooking.populate('carId', 'carName model brand');
+    await adminBooking.populate('createdBy', 'name email');
+
+    res.status(201).json({
+      message: 'Admin booking created successfully. Car is now blocked for the selected time.',
+      booking: adminBooking
+    });
+  } catch (error) {
+    console.error('Create admin booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all admin bookings
+app.get('/api/admin/bookings/offline', authenticate, isAdmin, async (req, res) => {
+  try {
+    const adminBookings = await AdminBooking.find()
+      .populate('carId', 'carName model brand type imageUrl')
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 });
+
+    res.json({ bookings: adminBookings });
+  } catch (error) {
+    console.error('Get admin bookings error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete admin booking
+app.delete('/api/admin/bookings/offline/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const booking = await AdminBooking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    await AdminBooking.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Admin booking deleted successfully. Time slot is now available.' });
+  } catch (error) {
+    console.error('Delete admin booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ADMIN STATS ====================
 
 app.get('/api/admin/stats', authenticate, isAdmin, async (req, res) => {
@@ -1832,7 +2024,7 @@ app.get('/api/health', (req, res) => {
     2: 'connecting',
     3: 'disconnecting'
   };
-  
+
   res.json({
     status: 'ok',
     server: 'running',
