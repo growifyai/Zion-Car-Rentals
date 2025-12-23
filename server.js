@@ -50,16 +50,38 @@ if (!fs.existsSync('./uploads')) {
 }
 
 // ==================== MONGODB CONNECTION ====================
-// MongoDB connection with retry logic
+// MongoDB connection with retry logic and better options
 const connectMongoDB = async () => {
+  const options = {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 10000, // Increase timeout to 10 seconds
+    socketTimeoutMS: 45000,
+    family: 4, // Force IPv4 (helps with DNS issues)
+    retryWrites: true,
+    retryReads: true,
+  };
+
   try {
-    await mongoose.connect(MONGODB_URI);
-    console.log('✅ MongoDB Connected');
+    console.log('🔄 Attempting to connect to MongoDB...');
+    console.log('MongoDB:', MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:****@')); // Hide password in logs
+    
+    await mongoose.connect(MONGODB_URI, options);
+    console.log('✅ MongoDB Connected Successfully');
   } catch (err) {
     console.error('❌ MongoDB Connection Error:', err.message);
-    console.log('⚠️  Server will continue running but database operations will fail.');
-    console.log('💡 To fix: Start MongoDB service with: sudo systemctl start mongod');
-    console.log('   Or install MongoDB if not installed.');
+    console.log('\n⚠️  Server will continue running but database operations will fail.');
+    console.log('\n🔧 Possible solutions:');
+    console.log('   1. Check your internet connection');
+    console.log('   2. Verify MongoDB Atlas credentials in .env file');
+    console.log('   3. Check if your IP is whitelisted in MongoDB Atlas');
+    console.log('   4. Try using Google DNS (8.8.8.8) or Cloudflare DNS (1.1.1.1)');
+    console.log('   5. If using VPN, try disconnecting it');
+    console.log('   6. Check firewall settings\n');
+    
+    // Retry connection after 5 seconds
+    console.log('🔄 Retrying connection in 5 seconds...');
+    setTimeout(connectMongoDB, 5000);
   }
 };
 
@@ -69,14 +91,25 @@ connectMongoDB();
 // Handle MongoDB connection events
 mongoose.connection.on('disconnected', () => {
   console.log('⚠️  MongoDB disconnected. Attempting to reconnect...');
+  setTimeout(connectMongoDB, 3000);
 });
 
 mongoose.connection.on('error', (err) => {
   console.error('❌ MongoDB Error:', err.message);
+  if (err.message.includes('EREFUSED') || err.message.includes('querySrv')) {
+    console.log('💡 DNS resolution error detected. This usually means:');
+    console.log('   - Network connectivity issues');
+    console.log('   - DNS server not responding');
+    console.log('   - Firewall blocking MongoDB Atlas');
+  }
 });
 
 mongoose.connection.on('reconnected', () => {
-  console.log('✅ MongoDB reconnected');
+  console.log('✅ MongoDB reconnected successfully');
+});
+
+mongoose.connection.on('connected', () => {
+  console.log('✅ MongoDB connection established');
 });
 
 // ==================== SCHEMAS ====================
@@ -1966,7 +1999,127 @@ app.get('/api/admin/bookings/offline', authenticate, isAdmin, async (req, res) =
   }
 });
 
-// Delete admin booking
+// Get admin bookings by carId (for fetching blocks)
+app.get('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { carId } = req.query;
+    
+    const query = carId ? { carId } : {};
+    const adminBookings = await AdminBooking.find(query)
+      .populate('carId', 'carName model brand type imageUrl')
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 });
+
+    res.json(adminBookings);
+  } catch (error) {
+    console.error('Get admin bookings error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update admin booking (for editing blocks)
+app.put('/api/admin/bookings/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { customerName, customerMobile, carId, startTime, endTime, amount, notes } = req.body;
+    const bookingId = req.params.id;
+
+    // Find existing booking
+    const existingBooking = await AdminBooking.findById(bookingId);
+    if (!existingBooking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    // Validate required fields
+    if (!customerName || !customerMobile || !carId || !startTime || !endTime) {
+      return res.status(400).json({ error: 'Customer name, mobile, car, start time and end time are required' });
+    }
+
+    // Verify car exists
+    const car = await Car.findById(carId);
+    if (!car) {
+      return res.status(404).json({ error: 'Car not found' });
+    }
+
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+
+    if (end <= start) {
+      return res.status(400).json({ error: 'End time must be after start time' });
+    }
+
+    // Calculate duration in hours for availability check
+    const durationHours = Math.ceil((end - start) / (60 * 60 * 1000));
+
+    // Check availability before updating (exclude the current booking being edited)
+    const blockingStatuses = ['advance_paid', 'verified', 'active'];
+    const existingBookings = await Booking.find({
+      carId,
+      status: { $in: blockingStatuses }
+    }).sort({ startTime: 1 });
+
+    // Get other admin bookings (excluding the one being edited)
+    const adminBookings = await AdminBooking.find({ 
+      carId,
+      _id: { $ne: bookingId } // Exclude current booking
+    }).sort({ startTime: 1 });
+
+    // Combine all bookings
+    const allBlockingBookings = [
+      ...existingBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime, type: 'regular' })),
+      ...adminBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime, type: 'admin' }))
+    ].sort((a, b) => a.startTime - b.startTime);
+
+    // Check for overlaps
+    for (const booking of allBlockingBookings) {
+      if (checkTimeOverlap(start, end, booking.startTime, booking.endTime)) {
+        return res.status(400).json({
+          error: 'Car is not available for the selected time. There is a conflict with an existing booking.'
+        });
+      }
+    }
+
+    // Update the booking
+    existingBooking.customerName = customerName;
+    existingBooking.customerMobile = customerMobile;
+    existingBooking.carId = carId;
+    existingBooking.startTime = start;
+    existingBooking.endTime = end;
+    existingBooking.amount = amount || 0;
+    existingBooking.notes = notes || '';
+
+    await existingBooking.save();
+
+    // Populate car details for response
+    await existingBooking.populate('carId', 'carName model brand');
+    await existingBooking.populate('createdBy', 'name email');
+
+    res.json({
+      message: 'Admin booking updated successfully',
+      booking: existingBooking
+    });
+  } catch (error) {
+    console.error('Update admin booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete admin booking (supports both routes)
+app.delete('/api/admin/bookings/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const booking = await AdminBooking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    await AdminBooking.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Admin booking deleted successfully. Time slot is now available.' });
+  } catch (error) {
+    console.error('Delete admin booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete admin booking (legacy route for backward compatibility)
 app.delete('/api/admin/bookings/offline/:id', authenticate, isAdmin, async (req, res) => {
   try {
     const booking = await AdminBooking.findById(req.params.id);
