@@ -7,6 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -38,6 +39,135 @@ if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET &&
   console.log('⚠️  Razorpay keys not configured. Please add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to .env');
   console.log('   Payment gateway will not be available until keys are configured.');
 }
+
+// ==================== EMAIL CONFIGURATION ====================
+// Initialize Nodemailer transporter
+let emailTransporter = null;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
+
+if (EMAIL_USER && EMAIL_APP_PASSWORD && ADMIN_EMAIL) {
+  try {
+    emailTransporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: EMAIL_USER,
+        pass: EMAIL_APP_PASSWORD,
+      },
+    });
+    console.log('✅ Email service initialized successfully');
+  } catch (error) {
+    console.error('❌ Email service initialization error:', error.message);
+    console.log('⚠️  Email notifications will not be sent.');
+  }
+} else {
+  console.log('⚠️  Email credentials not configured. Please add EMAIL_USER, EMAIL_APP_PASSWORD, and ADMIN_EMAIL to .env');
+  console.log('   Email notifications will not be sent until configured.');
+}
+
+// Email utility function
+const sendNewBookingEmail = async (bookingDetails) => {
+  if (!emailTransporter || !ADMIN_EMAIL) {
+    console.log('⚠️  Email service not configured. Skipping email notification.');
+    return;
+  }
+
+  try {
+    const { customerName, mobile, email, carName, startTime, endTime, totalPrice, bookingId } = bookingDetails;
+    
+    const mailOptions = {
+      from: EMAIL_USER,
+      to: ADMIN_EMAIL,
+      subject: `🚗 New Booking Alert - ${carName}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; }
+            .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+            .content { background-color: white; padding: 30px; border-radius: 0 0 5px 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            .info-row { margin: 15px 0; padding: 10px; background-color: #f5f5f5; border-left: 4px solid #4CAF50; }
+            .label { font-weight: bold; color: #555; }
+            .value { color: #333; }
+            .footer { text-align: center; margin-top: 20px; color: #777; font-size: 12px; }
+            .highlight { color: #4CAF50; font-weight: bold; font-size: 18px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>🚗 New Booking Received!</h1>
+            </div>
+            <div class="content">
+              <p>Hello Admin,</p>
+              <p>A new booking has been created from the customer portal. Here are the details:</p>
+              
+              <div class="info-row">
+                <span class="label">Booking ID:</span> <span class="value">${bookingId}</span>
+              </div>
+              
+              <div class="info-row">
+                <span class="label">Customer Name:</span> <span class="value">${customerName}</span>
+              </div>
+              
+              <div class="info-row">
+                <span class="label">Mobile:</span> <span class="value">${mobile}</span>
+              </div>
+              
+              ${email ? `<div class="info-row"><span class="label">Email:</span> <span class="value">${email}</span></div>` : ''}
+              
+              <div class="info-row">
+                <span class="label">Car:</span> <span class="value">${carName}</span>
+              </div>
+              
+              <div class="info-row">
+                <span class="label">Start Time:</span> <span class="value">${new Date(startTime).toLocaleString('en-GB', { 
+                  day: '2-digit', 
+                  month: '2-digit', 
+                  year: 'numeric', 
+                  hour: '2-digit', 
+                  minute: '2-digit' 
+                })}</span>
+              </div>
+              
+              <div class="info-row">
+                <span class="label">End Time:</span> <span class="value">${new Date(endTime).toLocaleString('en-GB', { 
+                  day: '2-digit', 
+                  month: '2-digit', 
+                  year: 'numeric', 
+                  hour: '2-digit', 
+                  minute: '2-digit' 
+                })}</span>
+              </div>
+              
+              <div class="info-row">
+                <span class="label">Total Price:</span> <span class="highlight">₹${totalPrice.toLocaleString()}</span>
+              </div>
+              
+              <p style="margin-top: 25px; padding: 15px; background-color: #e8f5e9; border-radius: 5px;">
+                <strong>⚡ Action Required:</strong> Please review this booking in your admin dashboard and ensure all arrangements are in place.
+              </p>
+            </div>
+            <div class="footer">
+              <p>This is an automated notification from your Car Rental System.</p>
+              <p>Please do not reply to this email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `,
+    };
+
+    await emailTransporter.sendMail(mailOptions);
+    console.log(`✅ New booking email sent to admin for booking ID: ${bookingId}`);
+  } catch (error) {
+    console.error('❌ Failed to send new booking email:', error.message);
+    // Don't throw error - we don't want email failure to break the booking process
+  }
+};
 
 // ==================== EXPRESS MIDDLEWARE ====================
 app.use(cors());
@@ -289,15 +419,53 @@ const carsBannerSchema = new mongoose.Schema({
 
 // Schema for admin-created offline bookings (walk-in customers)
 const adminBookingSchema = new mongoose.Schema({
+  customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: false },
   customerName: { type: String, required: true },
-  customerMobile: { type: String, required: true },
+  guardianName: { type: String, required: false },
+  guardianRelation: { type: String, required: false },
+  mobile: { type: String, required: true },
+  email: { type: String, required: false },
+  occupation: { type: String, required: false },
+  residentialAddress: { type: String, required: false },
+  drivingLicenseNumber: { type: String, required: false },
+  licenseExpiryDate: { type: Date, required: false },
   carId: { type: mongoose.Schema.Types.ObjectId, ref: 'Car', required: true },
   startTime: { type: Date, required: true },
   endTime: { type: Date, required: true },
-  amount: { type: Number },
+  totalAmount: { type: Number, required: true, default: 0 },
+  advancedAmount: { type: Number, default: 0 },
+  discount: { type: Number, default: 0 },
+  additionalFee1Name: { type: String, required: false },
+  additionalFee1Amount: { type: Number, required: false },
+  additionalFee2Name: { type: String, required: false },
+  additionalFee2Amount: { type: Number, required: false },
+  additionalFee3Name: { type: String, required: false },
+  additionalFee3Amount: { type: Number, required: false },
+  paymentStatus: { type: String, enum: ['unpaid', 'advanced', 'full'], default: 'unpaid' },
+  paidAmount: { type: Number, default: 0 },
+  paymentMode: { type: String, enum: ['cash', 'upi', 'bank_transfer'], default: 'cash' },
   notes: { type: String },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   createdAt: { type: Date, default: Date.now }
+});
+
+// Schema for customer database management (admin only)
+const customerSchema = new mongoose.Schema({
+  fullName: { type: String, required: true },
+  guardianName: { type: String, required: true },
+  guardianRelation: { type: String, required: true },
+  mobile: { type: String, required: true },
+  email: { type: String, required: true },
+  occupation: { type: String, required: true },
+  residentialAddress: { type: String, required: true },
+  drivingLicenseNumber: { type: String, required: true },
+  licenseExpiryDate: { type: Date, required: true },
+  drivingLicenseImage: { type: String },
+  aadharCardImage: { type: String },
+  livePhoto: { type: String },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
 });
 
 // ==================== MODELS ====================
@@ -311,6 +479,7 @@ const HeroVideo = mongoose.model('HeroVideo', heroVideoSchema);
 const OfferBanner = mongoose.model('OfferBanner', offerBannerSchema);
 const CarsBanner = mongoose.model('CarsBanner', carsBannerSchema);
 const AdminBooking = mongoose.model('AdminBooking', adminBookingSchema);
+const Customer = mongoose.model('Customer', customerSchema);
 
 // ==================== MULTER SETUP ====================
 
@@ -459,13 +628,21 @@ const generateReceiptPDF = async (booking, car, customer) => {
         reject(error);
       });
 
-      // Set initial position at document margin and disable any strokes to prevent unwanted borders
-      const topMargin = 50; // Start at document margin
-      doc.y = topMargin;
-      doc.lineWidth(0); // Disable line drawing to prevent any borders
+      const pageWidth = doc.page.width;
+      const pageHeight = doc.page.height;
+      const margin = 50;
 
-      // Logo (if exists) - centered at top
-      // Check possible locations for the logo
+      // Header - Company Name
+      doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('ZION CAR RENTAL SERVICE', margin, 50);
+      
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      doc.text('8.5.199 mallika arjuna colony old bowenpally telangana', margin, 70);
+      doc.text('Phone no - 9100664083', margin, 82);
+      doc.text('Email: zioncarrentals90@gmail.com', margin, 94);
+      doc.text('State: 36-Telangana', margin, 106);
+
+      // Logo on right side
       const possibleLogoPaths = [
         path.join(__dirname, 'uploads', 'logo.png'),
         path.join(__dirname, 'uploads', 'logo.jpg'),
@@ -476,213 +653,285 @@ const generateReceiptPDF = async (booking, car, customer) => {
       for (const testPath of possibleLogoPaths) {
         if (fs.existsSync(testPath)) {
           logoPath = testPath;
-          console.log(`✅ Logo found at: ${logoPath}`);
           break;
         }
       }
 
-      const logoWidth = 120; // Logo width in points
-
       if (logoPath) {
         try {
-          const logoX = (doc.page.width - logoWidth) / 2; // Center horizontally
-          // Place logo at top margin - maintain aspect ratio by only specifying width
-          doc.image(logoPath, logoX, topMargin, { width: logoWidth });
-          // Move down after logo with reasonable spacing (logo will typically be around 120px tall)
-          doc.y = topMargin + logoWidth + 25; // Add extra spacing for logo
-          console.log(`✅ Logo added to PDF successfully from: ${logoPath}`);
+          doc.image(logoPath, pageWidth - margin - 60, 50, { width: 60, height: 60 });
         } catch (error) {
-          console.error('❌ Error adding logo to PDF:', error);
-          console.error('Logo path attempted:', logoPath);
-          console.error('Error details:', error.message);
-          doc.y = topMargin; // Start position if logo fails
+          console.error('Error adding logo:', error);
         }
-      } else {
-        console.log('⚠️  Logo not found. Checked paths:', possibleLogoPaths);
-        doc.y = topMargin; // Start position if no logo
       }
 
-      // Company Header
-      doc.fontSize(22).font('Helvetica-Bold').fillColor('#1a1a1a');
-      doc.text('Zion Car Rentals', { align: 'center' });
-      doc.moveDown(0.4);
-      doc.fontSize(11).font('Helvetica').fillColor('#666666');
-      doc.text('Premium Car Rental Service', { align: 'center' });
-      doc.moveDown(0.3);
+      // Horizontal line below header
+      doc.strokeColor('#000000').lineWidth(1);
+      doc.moveTo(margin, 125).lineTo(pageWidth - margin, 125).stroke();
+
+      // Invoice title (centered, blue)
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#0066cc');
+      doc.text('Invoice', margin, 135, { align: 'center', width: pageWidth - 2 * margin });
+
+      // Bill To section (left) and Invoice Details (right)
+      const billToY = 158;
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Bill To', margin, billToY);
+
+      const customerName = customer.name || booking.fullName || booking.customerName || 'N/A';
+      const guardianRelation = customer.guardianRelation || booking.guardianRelation || 'S/o';
+      const guardianName = customer.guardianName || booking.guardianName;
+      const guardianInfo = guardianName ? `${guardianRelation} ${guardianName}` : '';
+      const fullCustomerName = guardianInfo ? `${customerName} ${guardianInfo}` : customerName;
+
       doc.fontSize(9).font('Helvetica').fillColor('#333333');
-      doc.text('8,5,199 Mallika Arjuna Colony, Old Bowenpally, Hyderabad - 500011', { align: 'center' });
-      doc.moveDown(0.2);
-      doc.text('Phone: +91 9100664083 | Email: zioncarrentals90@gmail.com', { align: 'center' });
+      doc.text(fullCustomerName, margin, billToY + 15);
+      doc.text(`Contact No.: ${customer.mobile || booking.mobile || 'N/A'}`, margin, billToY + 28);
+      doc.text(`Email: ${customer.email || booking.email || 'N/A'}`, margin, billToY + 41);
+      doc.text(`Address: ${customer.residentialAddress || booking.residentialAddress || 'N/A'}`, margin, billToY + 54, { width: 280 });
 
-      // Separator line
-      doc.moveDown(0.8);
-      doc.strokeColor('#cccccc');
-      doc.lineWidth(0.5);
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown(0.8);
+      // Invoice Details (right side)
+      const rightColX = pageWidth - margin - 150;
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Invoice Details', rightColX, billToY - 5);
 
-      // Receipt Title
-      doc.fontSize(16).font('Helvetica-Bold').fillColor('#000000');
-      doc.text('Advance Payment Receipt', { align: 'center' });
-      doc.moveDown(0.8);
-
-      // Receipt Number and Date Section
-      doc.fontSize(9).font('Helvetica').fillColor('#333333');
-      const receiptNo = booking._id.toString().slice(-8).toUpperCase();
-      const receiptDate = new Date(booking.advancePaymentDate || booking.createdAt).toLocaleDateString('en-IN', {
+      const invoiceNo = booking._id.toString().slice(-3).toUpperCase();
+      const invoiceDate = new Date(booking.createdAt).toLocaleDateString('en-GB', {
         day: '2-digit',
-        month: 'long',
+        month: '2-digit',
         year: 'numeric'
       });
-
-      doc.text(`Receipt No: ${receiptNo}`, 50, doc.y);
-      const dateWidth = doc.widthOfString(`Date: ${receiptDate}`);
-      doc.text(`Date: ${receiptDate}`, doc.page.width - 50 - dateWidth, doc.y);
-      doc.moveDown(0.8);
-
-      // Separator line
-      doc.strokeColor('#e0e0e0');
-      doc.lineWidth(0.3);
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown(0.8);
-
-      // Customer Details Section (with 2 columns inside)
-      const sectionStartY = doc.y;
-      const leftMargin = 50;
-      const sectionWidth = doc.page.width - 100;
-      const lineHeight = 12;
-      const sectionTitleHeight = 15;
-
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-      doc.text('Customer Details', leftMargin, sectionStartY);
-
-      let currentY = sectionStartY + sectionTitleHeight;
-      doc.fontSize(9).font('Helvetica').fillColor('#333333');
-      const customerName = `${booking.fullName} ${booking.guardianRelation} ${booking.guardianName}`;
-
-      // Customer details in 2 columns
-      const leftColX = leftMargin;
-      const rightColX = leftMargin + sectionWidth / 2 + 10;
-      const colWidth = sectionWidth / 2 - 10;
-
-      doc.text(`Name: ${customerName}`, leftColX, currentY, { width: colWidth });
-      doc.text(`Email: ${booking.email}`, rightColX, currentY, { width: colWidth });
-      currentY += lineHeight + 2;
-
-      doc.text(`Mobile: ${booking.mobile}`, leftColX, currentY, { width: colWidth });
-      doc.text(`Address: ${booking.residentialAddress}`, rightColX, currentY, { width: colWidth });
-      currentY += lineHeight + 8;
-
-      // Separator line
-      doc.strokeColor('#e0e0e0');
-      doc.lineWidth(0.3);
-      doc.moveTo(50, currentY).lineTo(doc.page.width - 50, currentY).stroke();
-      currentY += 12;
-
-      // Booking Details Section (with 2 columns inside) - Below Customer Details
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-      doc.text('Booking Details', leftMargin, currentY);
-
-      currentY += sectionTitleHeight;
-      doc.fontSize(9).font('Helvetica').fillColor('#333333');
-
-      // Booking details in 2 columns
-      doc.text(`Vehicle: ${car.carName} (${car.brand} ${car.model} ${car.year})`, leftColX, currentY, { width: sectionWidth });
-      currentY += lineHeight + 2;
-
-      const startDateTime = new Date(booking.startTime).toLocaleString('en-IN', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
+      const invoiceTime = new Date(booking.createdAt).toLocaleTimeString('en-GB', {
         hour: '2-digit',
         minute: '2-digit',
         hour12: true
       });
-      doc.text(`Start: ${startDateTime}`, leftColX, currentY, { width: colWidth });
 
-      const endDateTime = new Date(booking.endTime).toLocaleString('en-IN', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true
-      });
-      doc.text(`End: ${endDateTime}`, rightColX, currentY, { width: colWidth });
-      currentY += lineHeight + 2;
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      doc.text(`Invoice No.: ${invoiceNo}`, rightColX, billToY + 10);
+      doc.text(`Date: ${invoiceDate}`, rightColX, billToY + 23);
+      doc.text(`Time: ${invoiceTime}`, rightColX, billToY + 36);
 
-      doc.text(`Duration: ${booking.duration} hrs`, leftColX, currentY, { width: colWidth });
-      if (booking.withDriver) {
-        doc.text('Driver: Included', rightColX, currentY, { width: colWidth });
+      // Items Table
+      const tableTop = 240;
+      const tableHeaders = ['#', 'Item Name', 'Quantity', 'Price/ Unit', 'Discount', 'Amount'];
+      const colWidths = [30, 180, 60, 80, 80, 85];
+      let colX = margin;
+
+      // Table header background
+      doc.fillColor('#0099cc').rect(margin, tableTop, pageWidth - 2 * margin, 20).fill();
+
+      // Table headers
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#ffffff');
+      colX = margin;
+      for (let i = 0; i < tableHeaders.length; i++) {
+        doc.text(tableHeaders[i], colX + 5, tableTop + 6, { width: colWidths[i] - 10, align: i === 0 ? 'center' : 'left' });
+        colX += colWidths[i];
       }
-      currentY += lineHeight + 8;
 
-      // Move document position to after both sections
-      doc.y = currentY;
+      // Vertical lines for table header
+      doc.strokeColor('#ffffff').lineWidth(0.5);
+      colX = margin;
+      for (let i = 0; i < colWidths.length; i++) {
+        colX += colWidths[i];
+        if (i < colWidths.length - 1) {
+          doc.moveTo(colX, tableTop).lineTo(colX, tableTop + 20).stroke();
+        }
+      }
 
-      // Separator line
-      doc.strokeColor('#e0e0e0');
-      doc.lineWidth(0.3);
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown(0.8);
-
-      // Payment Summary Section
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a');
-      doc.text('Payment Summary', { underline: false });
-      doc.moveDown(0.5);
-
+      // Table row
+      const rowY = tableTop + 28;
+      doc.fontSize(9).font('Helvetica').fillColor('#000000');
+      
+      const carName = car.carName || car.name || 'Car Rental';
       const totalPrice = booking.totalPrice || 0;
-      const advanceAmount = booking.advanceAmount || 0;
-      const remainingAmount = totalPrice - advanceAmount;
+      const discount = booking.discount || 0;
+      const discountPercent = totalPrice > 0 ? ((discount / totalPrice) * 100).toFixed(2) : 0;
+      const netAmount = totalPrice - discount;
 
-      // Payment items in a table-like format
-      doc.fontSize(9).font('Helvetica').fillColor('#333333');
-      const leftCol = 50;
-      const rightCol = doc.page.width - 200;
+      colX = margin;
+      doc.text('1', colX + 5, rowY, { width: colWidths[0] - 10, align: 'center' });
+      colX += colWidths[0];
+      doc.text(carName, colX + 5, rowY, { width: colWidths[1] - 10 });
+      colX += colWidths[1];
+      doc.text('1', colX + 5, rowY, { width: colWidths[2] - 10, align: 'center' });
+      colX += colWidths[2];
+      doc.text(`Rs. ${totalPrice.toLocaleString('en-IN')}`, colX + 5, rowY, { width: colWidths[3] - 10 });
+      colX += colWidths[3];
+      doc.text(`Rs. ${discount.toLocaleString('en-IN')}\n(${discountPercent}%)`, colX + 5, rowY - 2, { width: colWidths[4] - 10 });
+      colX += colWidths[4];
+      doc.text(`Rs. ${netAmount.toLocaleString('en-IN')}`, colX + 5, rowY, { width: colWidths[5] - 10 });
 
-      // Total Rental Amount
-      doc.text('Total Rental Amount:', leftCol, doc.y);
-      doc.font('Helvetica-Bold');
-      doc.text(`₹${totalPrice.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-      doc.moveDown(0.5);
+      // Horizontal line after item row
+      const lineY = rowY + 25;
+      doc.strokeColor('#cccccc').lineWidth(0.5);
+      doc.moveTo(margin, lineY).lineTo(pageWidth - margin, lineY).stroke();
 
-      // Advance Amount Paid
-      doc.font('Helvetica');
-      doc.text('Advance Amount Paid:', leftCol, doc.y);
-      doc.font('Helvetica-Bold').fillColor('#2563eb');
-      doc.text(`₹${advanceAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-      doc.moveDown(0.5);
+      // Total row
+      const totalRowY = lineY + 8;
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Total', margin + colWidths[0] + 5, totalRowY);
+      const discountX = margin + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 5;
+      doc.text(`Rs. ${discount.toLocaleString('en-IN')}`, discountX, totalRowY);
+      const amountX = margin + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + 5;
+      doc.text(`Rs. ${netAmount.toLocaleString('en-IN')}`, amountX, totalRowY);
 
-      // Remaining Amount
+      // Horizontal line after total
+      const totalLineY = totalRowY + 18;
+      doc.strokeColor('#000000').lineWidth(0.5);
+      doc.moveTo(margin, totalLineY).lineTo(pageWidth - margin, totalLineY).stroke();
+
+      // Invoice Amount in Words
+      const amountInWordsY = totalLineY + 12;
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Invoice Amount In Words', margin, amountInWordsY);
       doc.font('Helvetica').fillColor('#333333');
-      doc.text('Remaining Amount to be Paid:', leftCol, doc.y);
-      doc.font('Helvetica-Bold').fillColor('#dc2626');
-      doc.text(`₹${remainingAmount.toLocaleString('en-IN')}`, rightCol, doc.y, { align: 'right', width: 150 });
-      doc.moveDown(1);
+      
+      // Convert number to words (simplified)
+      const numberToWords = (num) => {
+        if (num === 0) return 'Zero';
+        const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
+        const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+        const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+        
+        if (num < 10) return ones[num];
+        if (num < 20) return teens[num - 10];
+        if (num < 100) return tens[Math.floor(num / 10)] + (num % 10 ? ' ' + ones[num % 10] : '');
+        if (num < 1000) return ones[Math.floor(num / 100)] + ' Hundred' + (num % 100 ? ' ' + numberToWords(num % 100) : '');
+        if (num < 100000) return numberToWords(Math.floor(num / 1000)) + ' Thousand' + (num % 1000 ? ' ' + numberToWords(num % 1000) : '');
+        return 'Amount exceeds limit';
+      };
+      
+      const amountWords = numberToWords(Math.floor(totalPrice - discount)) + ' Rupees only';
+      doc.text(amountWords, margin, amountInWordsY + 15);
 
-      // Separator line
-      doc.strokeColor('#cccccc');
-      doc.lineWidth(0.5);
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown(0.6);
+      // Payment Summary Box (right side)
+      const summaryX = pageWidth - margin - 180;
+      const summaryY = amountInWordsY;
+      const summaryWidth = 180;
+      
+      const advanceAmount = booking.advanceAmount || 0;
+      
+      // Get additional fees from booking if available
+      const additionalFee1 = (booking.additionalFee1Name && booking.additionalFee1Amount) ? 
+        { name: booking.additionalFee1Name, amount: booking.additionalFee1Amount } : null;
+      const additionalFee2 = (booking.additionalFee2Name && booking.additionalFee2Amount) ? 
+        { name: booking.additionalFee2Name, amount: booking.additionalFee2Amount } : null;
+      const additionalFee3 = (booking.additionalFee3Name && booking.additionalFee3Amount) ? 
+        { name: booking.additionalFee3Name, amount: booking.additionalFee3Amount } : null;
+      
+      // Calculate total additional fees
+      const totalAdditionalFees = (additionalFee1?.amount || 0) + (additionalFee2?.amount || 0) + (additionalFee3?.amount || 0);
+      const finalTotal = netAmount + totalAdditionalFees;
+      const balance = finalTotal - advanceAmount;
 
-      // Important Note
-      doc.fontSize(8.5).font('Helvetica-Oblique').fillColor('#666666');
-      const noteText = 'Note: The remaining amount must be paid at the time of vehicle pickup. Please bring your Aadhaar card and valid driving license for verification.';
-      doc.text(noteText, 50, doc.y, { align: 'left', width: doc.page.width - 100 });
-      doc.moveDown(0.8);
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      
+      let currentY = summaryY;
+      
+      // Sub Total
+      doc.text('Sub Total', summaryX, currentY);
+      doc.text(`Rs. ${totalPrice.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+      currentY += 15;
 
-      // Footer
-      doc.strokeColor('#e0e0e0');
-      doc.lineWidth(0.3);
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown(0.5);
+      // Discount
+      doc.text('Discount', summaryX, currentY);
+      doc.text(`Rs. ${discount.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+      currentY += 17;
 
-      doc.fontSize(8).font('Helvetica').fillColor('#999999');
-      doc.text('This is a computer-generated receipt. No signature required.', { align: 'center' });
-      doc.moveDown(0.3);
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333333');
-      doc.text('Thank you for choosing Zion Car Rentals!', { align: 'center' });
+      // Additional Fees (if any)
+      if (additionalFee1) {
+        doc.text(additionalFee1.name, summaryX, currentY, { width: 85 });
+        doc.text(`Rs. ${additionalFee1.amount.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+        currentY += 15;
+      }
+      if (additionalFee2) {
+        doc.text(additionalFee2.name, summaryX, currentY, { width: 85 });
+        doc.text(`Rs. ${additionalFee2.amount.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+        currentY += 15;
+      }
+      if (additionalFee3) {
+        doc.text(additionalFee3.name, summaryX, currentY, { width: 85 });
+        doc.text(`Rs. ${additionalFee3.amount.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+        currentY += 15;
+      }
+
+      // Total row with blue background
+      doc.fillColor('#0099cc').rect(summaryX, currentY, summaryWidth, 18).fill();
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#ffffff');
+      doc.text('Total', summaryX + 5, currentY + 5);
+      doc.text(`Rs. ${finalTotal.toLocaleString('en-IN')}`, summaryX + 90, currentY + 5, { width: 85, align: 'right' });
+      currentY += 23;
+
+      // Continue with other summary items
+      doc.fontSize(9).font('Helvetica').fillColor('#333333');
+      
+      // Received
+      doc.text('Received', summaryX, currentY);
+      doc.text(`Rs. ${advanceAmount.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+      currentY += 15;
+
+      // Balance
+      doc.text('Balance', summaryX, currentY);
+      doc.text(`Rs. ${balance.toLocaleString('en-IN')}`, summaryX + 90, currentY, { width: 85, align: 'right' });
+      currentY += 15;
+
+      // Payment Mode
+      const paymentModeText = booking.paymentMode === 'cash' ? 'Cash' : 
+                              booking.paymentMode === 'upi' ? 'UPI' : 
+                              booking.paymentMode === 'bank_transfer' ? 'Bank Transfer' : 'Cash';
+      doc.text('Payment Mode', summaryX, currentY);
+      doc.text(paymentModeText, summaryX + 70, currentY, { width: 105, align: 'right' });
+
+      // Bank Details and Signature (side by side, bottom)
+      const bottomSectionY = currentY + 35;
+      
+      // Bank Details (left side)
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Pay To:', margin, bottomSectionY);
+      
+      doc.fontSize(8).font('Helvetica').fillColor('#333333');
+      doc.text('Bank Name: Tirumulgerry', margin, bottomSectionY + 15);
+      doc.text('Bank Account No.: 50200095949960', margin, bottomSectionY + 28);
+      doc.text('Bank IFSC code: HDFC0006957', margin, bottomSectionY + 41);
+      doc.text('Account Holder\'s Name: Zion Car Rental Service.', margin, bottomSectionY + 54);
+
+      // Authorized Signatory (right side, aligned with bank details)
+      doc.fontSize(8).font('Helvetica').fillColor('#333333');
+      doc.text('For: ZION CAR RENTAL SERVICE', summaryX, bottomSectionY, { width: 180, align: 'right' });
+      
+      // Signature image
+      const possibleSignaturePaths = [
+        path.join(__dirname, 'uploads', 'signature.png'),
+        path.join(__dirname, 'uploads', 'signature.jpg'),
+        path.join(__dirname, 'uploads', 'signature.jpeg'),
+      ];
+
+      let signaturePath = null;
+      for (const testPath of possibleSignaturePaths) {
+        if (fs.existsSync(testPath)) {
+          signaturePath = testPath;
+          break;
+        }
+      }
+
+      if (signaturePath) {
+        try {
+          doc.image(signaturePath, summaryX + 80, bottomSectionY + 15, { width: 80, height: 70, align: 'right' });
+        } catch (error) {
+          console.error('Error adding signature:', error);
+          // Fallback to text if image fails
+          doc.fontSize(10).font('Helvetica-Oblique').fillColor('#666666');
+          doc.text('Signature', summaryX + 90, bottomSectionY + 45, { width: 85, align: 'right' });
+        }
+      } else {
+        // Signature placeholder text if no image
+        doc.fontSize(10).font('Helvetica-Oblique').fillColor('#666666');
+        doc.text('Signature', summaryX + 90, bottomSectionY + 45, { width: 85, align: 'right' });
+      }
+      
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000000');
+      doc.text('Authorized Signatory', summaryX + 55, bottomSectionY + 90, { width: 120, align: 'center' });
 
       doc.end();
     } catch (error) {
@@ -1063,6 +1312,18 @@ app.post('/api/bookings',
         booking._id,
         'booking_update'
       );
+
+      // Send email notification to admin about new booking
+      await sendNewBookingEmail({
+        bookingId: booking._id,
+        customerName: fullName,
+        mobile,
+        email,
+        carName: car.carName,
+        startTime: start,
+        endTime: end,
+        totalPrice
+      });
 
       res.status(201).json({
         message: 'Booking created successfully. Car is now blocked for your selected time.',
@@ -1924,11 +2185,51 @@ app.put('/api/admin/cars-banner', authenticate, isAdmin, async (req, res) => {
 // Create admin booking (offline walk-in customer)
 app.post('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
   try {
-    const { customerName, customerMobile, carId, startTime, endTime, amount, notes } = req.body;
+    const { 
+      customerId,
+      customerName,
+      guardianName,
+      guardianRelation,
+      mobile,
+      email,
+      occupation,
+      residentialAddress,
+      drivingLicenseNumber,
+      licenseExpiryDate,
+      carId,
+      startTime,
+      endTime,
+      totalAmount,
+      advancedAmount,
+      discount,
+      notes,
+      additionalFee1Name,
+      additionalFee1Amount,
+      additionalFee2Name,
+      additionalFee2Amount,
+      additionalFee3Name,
+      additionalFee3Amount
+    } = req.body;
+
+    // Check if this is a car block (customerName === "BLOCKED")
+    const isBlock = customerName === "BLOCKED";
 
     // Validate required fields
-    if (!customerName || !customerMobile || !carId || !startTime || !endTime) {
-      return res.status(400).json({ error: 'Customer name, mobile, car, start time and end time are required' });
+    if (!isBlock && (!customerId || !customerName || !mobile || !carId || !startTime || !endTime)) {
+      return res.status(400).json({ error: 'Customer, car, start time and end time are required' });
+    }
+
+    // For blocks, only validate car, start time, and end time
+    if (isBlock && (!carId || !startTime || !endTime)) {
+      return res.status(400).json({ error: 'Car, start time and end time are required' });
+    }
+
+    // Verify customer exists (skip for blocks)
+    if (!isBlock) {
+      const customer = await Customer.findById(customerId);
+      if (!customer) {
+        return res.status(404).json({ error: 'Customer not found' });
+      }
     }
 
     // Verify car exists
@@ -1958,20 +2259,37 @@ app.post('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
     }
 
     const adminBooking = new AdminBooking({
+      customerId: isBlock ? null : customerId,
       customerName,
-      customerMobile,
+      guardianName: isBlock ? null : guardianName,
+      guardianRelation: isBlock ? null : guardianRelation,
+      mobile: isBlock ? "0000000000" : mobile,
+      email: isBlock ? null : email,
+      occupation: isBlock ? null : occupation,
+      residentialAddress: isBlock ? null : residentialAddress,
+      drivingLicenseNumber: isBlock ? null : drivingLicenseNumber,
+      licenseExpiryDate: isBlock ? null : (licenseExpiryDate ? new Date(licenseExpiryDate) : null),
       carId,
       startTime: start,
       endTime: end,
-      amount: amount || 0,
+      totalAmount: totalAmount || 0,
+      advancedAmount: advancedAmount || 0,
+      discount: discount || 0,
+      additionalFee1Name: additionalFee1Name || undefined,
+      additionalFee1Amount: additionalFee1Amount || undefined,
+      additionalFee2Name: additionalFee2Name || undefined,
+      additionalFee2Amount: additionalFee2Amount || undefined,
+      additionalFee3Name: additionalFee3Name || undefined,
+      additionalFee3Amount: additionalFee3Amount || undefined,
       notes: notes || '',
       createdBy: req.userId
     });
 
     await adminBooking.save();
 
-    // Populate car details for response
+    // Populate car and customer details for response
     await adminBooking.populate('carId', 'carName model brand');
+    await adminBooking.populate('customerId', 'fullName mobile email');
     await adminBooking.populate('createdBy', 'name email');
 
     res.status(201).json({
@@ -2103,6 +2421,113 @@ app.put('/api/admin/bookings/:id', authenticate, isAdmin, async (req, res) => {
   }
 });
 
+// Update payment status for admin booking
+app.patch('/api/admin/bookings/:id/payment', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { paymentType, customAmount } = req.body; // 'advanced', 'full', 'custom', or 'reset'
+    const bookingId = req.params.id;
+
+    const booking = await AdminBooking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    const totalAmount = booking.totalAmount || 0;
+    const discount = booking.discount || 0;
+    const additionalFees = (booking.additionalFee1Amount || 0) + (booking.additionalFee2Amount || 0) + (booking.additionalFee3Amount || 0);
+    const expectedAdvanced = booking.advancedAmount || 0; // Originally entered amount
+    const balanceAmount = totalAmount - discount + additionalFees;
+
+    if (paymentType === 'advanced') {
+      // Use the originally entered advanced amount
+      booking.paidAmount = expectedAdvanced;
+      booking.paymentStatus = 'advanced';
+    } else if (paymentType === 'full') {
+      // Set paid amount to full balance
+      booking.paidAmount = balanceAmount;
+      booking.paymentStatus = 'full';
+    } else if (paymentType === 'custom') {
+      // Use custom amount provided
+      if (typeof customAmount !== 'number' || customAmount <= 0) {
+        return res.status(400).json({ error: 'Invalid custom amount' });
+      }
+      booking.paidAmount = customAmount;
+      // Determine status based on amount
+      if (customAmount >= balanceAmount) {
+        booking.paymentStatus = 'full';
+      } else if (customAmount > 0) {
+        booking.paymentStatus = 'advanced';
+      } else {
+        booking.paymentStatus = 'unpaid';
+      }
+    } else if (paymentType === 'reset') {
+      // Reset payment
+      booking.paidAmount = 0;
+      booking.paymentStatus = 'unpaid';
+    } else {
+      return res.status(400).json({ error: 'Invalid payment type' });
+    }
+
+    await booking.save();
+
+    // Populate for response
+    await booking.populate('carId', 'carName model brand type imageUrl');
+    await booking.populate('createdBy', 'name email');
+
+    res.json({
+      message: 'Payment status updated successfully',
+      booking
+    });
+  } catch (error) {
+    console.error('Update payment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update admin booking (additional fees, notes, etc.)
+app.patch('/api/admin/bookings/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    const {
+      additionalFee1Name,
+      additionalFee1Amount,
+      additionalFee2Name,
+      additionalFee2Amount,
+      additionalFee3Name,
+      additionalFee3Amount,
+      notes
+    } = req.body;
+
+    const booking = await AdminBooking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    // Update fields if provided
+    if (additionalFee1Name !== undefined) booking.additionalFee1Name = additionalFee1Name;
+    if (additionalFee1Amount !== undefined) booking.additionalFee1Amount = additionalFee1Amount;
+    if (additionalFee2Name !== undefined) booking.additionalFee2Name = additionalFee2Name;
+    if (additionalFee2Amount !== undefined) booking.additionalFee2Amount = additionalFee2Amount;
+    if (additionalFee3Name !== undefined) booking.additionalFee3Name = additionalFee3Name;
+    if (additionalFee3Amount !== undefined) booking.additionalFee3Amount = additionalFee3Amount;
+    if (notes !== undefined) booking.notes = notes;
+
+    await booking.save();
+
+    // Populate for response
+    await booking.populate('carId', 'carName model brand type imageUrl');
+    await booking.populate('createdBy', 'name email');
+
+    res.json({
+      message: 'Booking updated successfully',
+      booking
+    });
+  } catch (error) {
+    console.error('Update booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Delete admin booking (supports both routes)
 app.delete('/api/admin/bookings/:id', authenticate, isAdmin, async (req, res) => {
   try {
@@ -2131,6 +2556,252 @@ app.delete('/api/admin/bookings/offline/:id', authenticate, isAdmin, async (req,
     res.json({ message: 'Admin booking deleted successfully. Time slot is now available.' });
   } catch (error) {
     console.error('Delete admin booking error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Generate receipt for admin booking
+app.get('/api/admin/bookings/:id/receipt', authenticate, isAdmin, async (req, res) => {
+  try {
+    const booking = await AdminBooking.findById(req.params.id)
+      .populate('carId')
+      .populate('customerId');
+
+    if (!booking) {
+      return res.status(404).json({ error: 'Admin booking not found' });
+    }
+
+    // Check if any payment has been made
+    if (!booking.paidAmount || booking.paidAmount === 0) {
+      return res.status(400).json({ error: 'Receipt can only be generated after payment is recorded' });
+    }
+
+    // Create a customer object compatible with generateReceiptPDF
+    const customerData = {
+      name: booking.customerName,
+      email: booking.email,
+      mobile: booking.mobile,
+      guardianName: booking.guardianName,
+      guardianRelation: booking.guardianRelation,
+      occupation: booking.occupation,
+      residentialAddress: booking.residentialAddress,
+      drivingLicenseNumber: booking.drivingLicenseNumber,
+      licenseExpiryDate: booking.licenseExpiryDate
+    };
+
+    // Create a booking object compatible with generateReceiptPDF
+    const bookingData = {
+      _id: booking._id,
+      startTime: booking.startTime,
+      endTime: booking.endTime,
+      totalPrice: booking.totalAmount,
+      advanceAmount: booking.paidAmount,
+      discount: booking.discount || 0,
+      additionalFee1Name: booking.additionalFee1Name,
+      additionalFee1Amount: booking.additionalFee1Amount,
+      additionalFee2Name: booking.additionalFee2Name,
+      additionalFee2Amount: booking.additionalFee2Amount,
+      additionalFee3Name: booking.additionalFee3Name,
+      additionalFee3Amount: booking.additionalFee3Amount,
+      createdAt: booking.createdAt,
+      notes: booking.notes || ''
+    };
+
+    // Generate PDF on-demand
+    const pdfBuffer = await generateReceiptPDF(bookingData, booking.carId, customerData);
+
+    // Send the PDF directly from memory
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="admin-booking-receipt-${booking._id}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Error serving admin booking receipt PDF:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate receipt' });
+  }
+});
+
+// ==================== CUSTOMER MANAGEMENT (ADMIN ONLY) ====================
+
+// Get all customers
+app.get('/api/admin/customers', authenticate, isAdmin, async (req, res) => {
+  try {
+    const customers = await Customer.find()
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 });
+    res.json({ customers });
+  } catch (error) {
+    console.error('Fetch customers error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single customer by ID
+app.get('/api/admin/customers/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.params.id)
+      .populate('createdBy', 'name email');
+    
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    
+    res.json({ customer });
+  } catch (error) {
+    console.error('Fetch customer error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new customer
+app.post('/api/admin/customers', authenticate, isAdmin, async (req, res) => {
+  try {
+    const {
+      fullName,
+      guardianName,
+      guardianRelation,
+      mobile,
+      email,
+      occupation,
+      residentialAddress,
+      drivingLicenseNumber,
+      licenseExpiryDate,
+      drivingLicenseImage,
+      aadharCardImage,
+      livePhoto
+    } = req.body;
+
+    // Validation
+    if (!fullName || !guardianName || !guardianRelation || !mobile || !email || 
+        !occupation || !residentialAddress || !drivingLicenseNumber || !licenseExpiryDate) {
+      return res.status(400).json({ error: 'All required fields must be provided' });
+    }
+
+    // Check if customer with same mobile or email already exists
+    const existingCustomer = await Customer.findOne({
+      $or: [{ mobile }, { email }]
+    });
+
+    if (existingCustomer) {
+      return res.status(400).json({ 
+        error: 'Customer with this mobile number or email already exists' 
+      });
+    }
+
+    const customer = new Customer({
+      fullName,
+      guardianName,
+      guardianRelation,
+      mobile,
+      email,
+      occupation,
+      residentialAddress,
+      drivingLicenseNumber,
+      licenseExpiryDate,
+      drivingLicenseImage,
+      aadharCardImage,
+      livePhoto,
+      createdBy: req.userId
+    });
+
+    await customer.save();
+
+    const populatedCustomer = await Customer.findById(customer._id)
+      .populate('createdBy', 'name email');
+
+    res.status(201).json({
+      message: 'Customer created successfully',
+      customer: populatedCustomer
+    });
+  } catch (error) {
+    console.error('Create customer error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update customer
+app.put('/api/admin/customers/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const {
+      fullName,
+      guardianName,
+      guardianRelation,
+      mobile,
+      email,
+      occupation,
+      residentialAddress,
+      drivingLicenseNumber,
+      licenseExpiryDate,
+      drivingLicenseImage,
+      aadharCardImage,
+      livePhoto
+    } = req.body;
+
+    const customer = await Customer.findById(req.params.id);
+    
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    // Check if mobile or email is being changed to an existing one
+    if (mobile && mobile !== customer.mobile) {
+      const existingMobile = await Customer.findOne({ mobile, _id: { $ne: req.params.id } });
+      if (existingMobile) {
+        return res.status(400).json({ error: 'This mobile number is already in use' });
+      }
+    }
+
+    if (email && email !== customer.email) {
+      const existingEmail = await Customer.findOne({ email, _id: { $ne: req.params.id } });
+      if (existingEmail) {
+        return res.status(400).json({ error: 'This email is already in use' });
+      }
+    }
+
+    // Update fields
+    if (fullName) customer.fullName = fullName;
+    if (guardianName) customer.guardianName = guardianName;
+    if (guardianRelation) customer.guardianRelation = guardianRelation;
+    if (mobile) customer.mobile = mobile;
+    if (email) customer.email = email;
+    if (occupation) customer.occupation = occupation;
+    if (residentialAddress) customer.residentialAddress = residentialAddress;
+    if (drivingLicenseNumber) customer.drivingLicenseNumber = drivingLicenseNumber;
+    if (licenseExpiryDate) customer.licenseExpiryDate = licenseExpiryDate;
+    if (drivingLicenseImage !== undefined) customer.drivingLicenseImage = drivingLicenseImage;
+    if (aadharCardImage !== undefined) customer.aadharCardImage = aadharCardImage;
+    if (livePhoto !== undefined) customer.livePhoto = livePhoto;
+
+    customer.updatedAt = Date.now();
+
+    await customer.save();
+
+    const populatedCustomer = await Customer.findById(customer._id)
+      .populate('createdBy', 'name email');
+
+    res.json({
+      message: 'Customer updated successfully',
+      customer: populatedCustomer
+    });
+  } catch (error) {
+    console.error('Update customer error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete customer
+app.delete('/api/admin/customers/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.params.id);
+    
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    await Customer.findByIdAndDelete(req.params.id);
+
+    res.json({ message: 'Customer deleted successfully' });
+  } catch (error) {
+    console.error('Delete customer error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2223,7 +2894,15 @@ app.get('/', (req, res) => {
         'DELETE /api/notifications/:id'
       ],
       admin: [
-        'GET /api/admin/stats'
+        'GET /api/admin/stats',
+        'GET /api/admin/customers',
+        'GET /api/admin/customers/:id',
+        'POST /api/admin/customers',
+        'PUT /api/admin/customers/:id',
+        'DELETE /api/admin/customers/:id',
+        'GET /api/admin/bookings/offline',
+        'POST /api/admin/bookings',
+        'DELETE /api/admin/bookings/offline/:id'
       ]
     }
   });
