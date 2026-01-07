@@ -455,7 +455,7 @@ const customerSchema = new mongoose.Schema({
   guardianName: { type: String, required: true },
   guardianRelation: { type: String, required: true },
   mobile: { type: String, required: true },
-  email: { type: String, required: true },
+  email: { type: String, required: false },
   occupation: { type: String, required: true },
   residentialAddress: { type: String, required: true },
   drivingLicenseNumber: { type: String, required: true },
@@ -2202,6 +2202,7 @@ app.post('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
       totalAmount,
       advancedAmount,
       discount,
+      paymentMode,
       notes,
       additionalFee1Name,
       additionalFee1Amount,
@@ -2275,6 +2276,7 @@ app.post('/api/admin/bookings', authenticate, isAdmin, async (req, res) => {
       totalAmount: totalAmount || 0,
       advancedAmount: advancedAmount || 0,
       discount: discount || 0,
+      paymentMode: paymentMode || 'cash',
       additionalFee1Name: additionalFee1Name || undefined,
       additionalFee1Amount: additionalFee1Amount || undefined,
       additionalFee2Name: additionalFee2Name || undefined,
@@ -2603,6 +2605,7 @@ app.get('/api/admin/bookings/:id/receipt', authenticate, isAdmin, async (req, re
       additionalFee2Amount: booking.additionalFee2Amount,
       additionalFee3Name: booking.additionalFee3Name,
       additionalFee3Amount: booking.additionalFee3Amount,
+      paymentMode: booking.paymentMode || 'cash',
       createdAt: booking.createdAt,
       notes: booking.notes || ''
     };
@@ -2671,19 +2674,23 @@ app.post('/api/admin/customers', authenticate, isAdmin, async (req, res) => {
     } = req.body;
 
     // Validation
-    if (!fullName || !guardianName || !guardianRelation || !mobile || !email || 
+    if (!fullName || !guardianName || !guardianRelation || !mobile || 
         !occupation || !residentialAddress || !drivingLicenseNumber || !licenseExpiryDate) {
       return res.status(400).json({ error: 'All required fields must be provided' });
     }
 
     // Check if customer with same mobile or email already exists
+    const orConditions = [{ mobile }];
+    if (email) {
+      orConditions.push({ email });
+    }
     const existingCustomer = await Customer.findOne({
-      $or: [{ mobile }, { email }]
+      $or: orConditions
     });
 
     if (existingCustomer) {
       return res.status(400).json({ 
-        error: 'Customer with this mobile number or email already exists' 
+        error: 'Customer with this mobile number' + (email ? ' or email' : '') + ' already exists' 
       });
     }
 
